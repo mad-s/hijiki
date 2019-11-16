@@ -4,6 +4,9 @@ extern crate shaderc;
 
 extern crate rand;
 
+mod glm;
+use glm::*;
+
 fn load_shader(
     compiler: &mut shaderc::Compiler,
     device: &wgpu::Device,
@@ -52,19 +55,137 @@ fn load_shader(
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 struct Sphere {
-    position: [f32; 4],
-    diffuse: [f32; 4],
-    emissive: [f32; 4],
-    r: f32,
-    material: i32,
+    position_radius: Vec4,
 }
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
+struct Plane {
+    normal_offset: Vec4,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct DiffuseMaterial {
+    color: Vec3,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct MirrorMaterial {
+    dummy: u8,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct DielectricMaterial {
+    eta_ratio: f32,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct EmitterMaterial {
+    power: Vec3,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct Camera {
+    position: Vec3,
+    fov: f32,
+}
+
+struct Scene {
+    camera: Camera,
+
+    spheres: Vec<Sphere>,
+    planes: Vec<Plane>,
+    materials: Vec<u32>,
+
+    diffuse: Vec<DiffuseMaterial>,
+    mirrors: Vec<MirrorMaterial>,
+    dielectric: Vec<DielectricMaterial>,
+    emitters: Vec<EmitterMaterial>,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct SceneBufferInfo {
+    camera: Camera,
+    num_spheres: u32,
+    num_planes: u32,
+
+    num_diffuse: u32,
+    num_mirrors: u32,
+    num_dielectric: u32,
+    num_emitters: u32,
+}
+
+const BUFFER_ALIGNMENT : usize = 256;
+
+impl Scene {
+    fn subbuffer_sizes(&self) -> Vec<usize> {
+        assert_eq!(self.spheres.len() + self.planes.len(), self.materials.len());
+        vec![
+            std::mem::size_of::<SceneBufferInfo>(),
+            self.spheres.len() * std::mem::size_of::<Sphere>(),
+            self.planes.len() * std::mem::size_of::<Plane>(),
+            self.materials.len() * std::mem::size_of::<u32>(), // align to 16 bytes
+            self.diffuse.len() * std::mem::size_of::<DiffuseMaterial>(),
+            self.mirrors.len() * std::mem::size_of::<MirrorMaterial>(),
+            self.dielectric.len() * std::mem::size_of::<DielectricMaterial>(),
+            self.emitters.len() * std::mem::size_of::<EmitterMaterial>(),
+        ].iter().map(|size| (size + BUFFER_ALIGNMENT-1) & !(BUFFER_ALIGNMENT-1)).collect()
+    }
+
+    fn write_to_buffer(&self, mut buffer: &mut [u8]) {
+        assert_eq!(self.spheres.len() + self.planes.len(), self.materials.len());
+
+        let info = SceneBufferInfo {
+            camera: self.camera,
+            num_spheres: self.spheres.len() as u32,
+            num_planes: self.planes.len() as u32,
+
+            num_diffuse: self.diffuse.len() as u32,
+            num_mirrors: self.mirrors.len() as u32,
+            num_dielectric: self.dielectric.len() as u32,
+            num_emitters: self.emitters.len() as u32,
+        };
+
+        println!("{} bytes left", buffer.len());
+        unsafe fn put<T: Copy>(buffer: &mut &mut [u8], data: &[T]) {
+            let len = buffer.len();
+            let size = (data.len() * std::mem::size_of::<T>() + BUFFER_ALIGNMENT-1) & !(BUFFER_ALIGNMENT-1); // align to buffer size
+            println!("putting {} bytes", size);
+            assert!(len >= size);
+            let ptr = buffer.as_mut_ptr() as *mut T;
+            let target: &mut [T] = std::slice::from_raw_parts_mut(ptr, data.len());
+            target.copy_from_slice(data);
+            *buffer = std::slice::from_raw_parts_mut((ptr as *mut u8).add(size), len - size);
+            println!("{} bytes left", buffer.len());
+        }
+        unsafe {
+            put(&mut buffer, std::slice::from_ref(&info));
+            put(&mut buffer, &self.spheres[..]);
+            put(&mut buffer, &self.planes[..]);
+            put(&mut buffer, &self.materials[..]);
+
+            put(&mut buffer, &self.diffuse[..]);
+            put(&mut buffer, &self.mirrors[..]);
+            put(&mut buffer, &self.dielectric[..]);
+            put(&mut buffer, &self.emitters[..]);
+        }
+
+        assert!(buffer.is_empty()); // we filled the buffer
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 struct SampleInfo {
     id: u32,
     weight: f32,
-    sample_offset: [f32; 2],
+    sample_offset: Vec2,
 }
 
 fn main() {
@@ -87,38 +208,126 @@ fn main() {
         std::path::Path::new("shader/render.glsl"),
     );
 
-    let width = 800;
-    let height = 600;
+    let scene = Scene {
+        // cornell box
+        camera: Camera {
+            position: vec3(0., 0.91, 5.41),
+            fov: 27.7,
+        },
+        spheres: vec![
+            Sphere {
+                // mirror sphere
+                position_radius: vec4(-0.421400, 0.332100, -0.280000, 0.3263),
+            },
+            Sphere {
+                // glass sphere
+                position_radius: vec4(0.445800, 0.332100, 0.376700, 0.3263),
+            },
+            Sphere {
+                // light sphere
+                position_radius: vec4(0., 1.25, 0., 0.3263),
+            },
+        ],
+        planes: vec![
+            Plane {
+                normal_offset: vec4(
+                    // right wall pointing to the left
+                    -1., 0., 0., -1.,
+                ),
+            },
+            Plane {
+                normal_offset: vec4(
+                    // left wall pointing to the right
+                    1., 0., 0., -1.,
+                ),
+            },
+            Plane {
+                normal_offset: vec4(
+                    // ceiling
+                    0., -1.0, 0., -1.59,
+                ),
+            },
+            Plane {
+                normal_offset: vec4(
+                    // floor
+                    0., 1.0, 0., 0.,
+                ),
+            },
+            Plane {
+                normal_offset: vec4(
+                    // back
+                    0., 0., 1.0, -1.04,
+                ),
+            },
+        ],
+        materials: vec![
+            3, // mirror sphere
+            4, // glass sphere,
+            5, // emissive sphere
+            2, // right wall
+            1, // left wall,
+            0, // ceiling
+            0, // floor
+            0, // back
+        ],
 
-    let inv_half_height: f32 = 1.0 / (height / 2) as f32;
+        diffuse: vec![
+            DiffuseMaterial {
+                color: vec3(0.5, 0.5, 0.5),
+            }, // material 0: white diffuse
+            DiffuseMaterial {
+                color: vec3(0.5, 0.0, 0.0),
+            }, // material 1: red diffuse
+            DiffuseMaterial {
+                color: vec3(0.0, 0.0, 0.5),
+            }, // material 2: blue diffuse
+        ],
+        mirrors: vec![
+            MirrorMaterial { dummy: 0 }, // material 3: perfect mirror
+        ],
+        dielectric: vec![DielectricMaterial {
+            // material 4: glass
+            eta_ratio: 1.5,
+        }],
+        emitters: vec![EmitterMaterial {
+            power: vec3(1., 1., 1.), // material 5: white emitter
+        }],
+    };
 
-    let inputs: Vec<[f32; 4]> = (0..height)
+    let width = 1;
+    let height = 1;
+
+    let fov_factor: f32 = (scene.camera.fov / 2.).tan() * height as f32 / 2.;
+
+    let inputs: Vec<Vec4> = (0..height)
         .flat_map(move |y| {
             (0..width).map(move |x| {
-                [
-                    (x as f32 - 0.5 * width as f32) * inv_half_height,
-                    -(y as f32 - 0.5 * height as f32) * inv_half_height,
-                    1.0,
+                vec4(
+                    -(x as f32 - 0.5 * width as f32) * fov_factor,
+                    -(y as f32 - 0.5 * height as f32) * fov_factor,
+                    -1.0,
                     0.0,
-                ]
+                )
             })
         })
         .collect();
-    let input_buffer_size = (inputs.len() * std::mem::size_of::<[f32; 4]>()) as wgpu::BufferAddress;
+    let input_buffer_size = (inputs.len() * std::mem::size_of::<Vec4>()) as wgpu::BufferAddress;
 
-    let num_samples = 512;
+    let num_samples = 1;
     let samples: Vec<SampleInfo> = (0..num_samples)
         .map(|i| SampleInfo {
             id: i,
-            weight: 1./num_samples as f32,
-            sample_offset: [
-                inv_half_height * (rand::random::<f32>() - 0.5),
-                inv_half_height * (rand::random::<f32>() - 0.5),
-            ],
+            weight: 1. / num_samples as f32,
+            sample_offset: vec2(
+                fov_factor * (rand::random::<f32>() - 0.5),
+                fov_factor * (rand::random::<f32>() - 0.5),
+            ),
         })
         .collect();
-    let sample_buffer_size = (samples.len() * std::mem::size_of::<SampleInfo>()) as wgpu::BufferAddress;
+    let sample_buffer_size =
+        (samples.len() * std::mem::size_of::<SampleInfo>()) as wgpu::BufferAddress;
 
+    /*
     let spheres: Vec<Sphere> = vec![
         // right wall
         Sphere {
@@ -169,7 +378,8 @@ fn main() {
             material: 0,
         },
     ];
-    let scene_buffer_size = (spheres.len() * std::mem::size_of::<Sphere>()) as wgpu::BufferAddress;
+    */
+    //let scene_buffer_size = (spheres.len() * std::mem::size_of::<Sphere>()) as wgpu::BufferAddress;
 
     let input_staging_buffer = device
         .create_buffer_mapped(
@@ -203,9 +413,12 @@ fn main() {
             | wgpu::BufferUsage::COPY_SRC,
     });
 
-    let scene_staging_buffer = device
-        .create_buffer_mapped(spheres.len(), wgpu::BufferUsage::COPY_SRC)
-        .fill_from_slice(&spheres[..]);
+    let scene_subbuffer_sizes = scene.subbuffer_sizes();
+    let scene_buffer_size = scene_subbuffer_sizes.iter().sum::<usize>() as wgpu::BufferAddress;
+    let scene_staging_buffer =
+        device.create_buffer_mapped::<u8>(scene_buffer_size as usize, wgpu::BufferUsage::COPY_SRC);
+    scene.write_to_buffer(scene_staging_buffer.data);
+    let scene_staging_buffer = scene_staging_buffer.finish();
 
     let scene_storage_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         size: scene_buffer_size,
@@ -214,83 +427,98 @@ fn main() {
             | wgpu::BufferUsage::COPY_SRC,
     });
 
+    let mut bindings = vec![
+        // input
+        wgpu::BindGroupLayoutBinding {
+            binding: 0,
+            visibility: wgpu::ShaderStage::COMPUTE,
+            ty: wgpu::BindingType::StorageBuffer {
+                dynamic: false,
+                readonly: false,
+            },
+        },
+        // output
+        wgpu::BindGroupLayoutBinding {
+            binding: 1,
+            visibility: wgpu::ShaderStage::COMPUTE,
+            ty: wgpu::BindingType::StorageBuffer {
+                dynamic: false,
+                readonly: false,
+            },
+        },
+        // sample
+        wgpu::BindGroupLayoutBinding {
+            binding: 2,
+            visibility: wgpu::ShaderStage::COMPUTE,
+            ty: wgpu::BindingType::StorageBuffer {
+                dynamic: false,
+                readonly: false,
+            },
+        },
+    ];
+    // scene info
+    for (i, _subbuffer_size) in scene_subbuffer_sizes.iter().enumerate() {
+        bindings.push(
+            wgpu::BindGroupLayoutBinding {
+                binding: 3+i as u32,
+                visibility: wgpu::ShaderStage::COMPUTE,
+                ty: wgpu::BindingType::StorageBuffer {
+                    dynamic: false,
+                    readonly: false,
+                },
+            }
+        );
+    }
+
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        bindings: &[
-            // input
-            wgpu::BindGroupLayoutBinding {
-                binding: 0,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                },
-            },
-            // scene
-            wgpu::BindGroupLayoutBinding {
-                binding: 1,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                },
-            },
-            // sample
-            wgpu::BindGroupLayoutBinding {
-                binding: 2,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                },
-            },
-            // output
-            wgpu::BindGroupLayoutBinding {
-                binding: 3,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                },
-            },
-        ],
+        bindings: &bindings[..],
     });
+
+    let mut bindings = vec![
+        // input
+        wgpu::Binding {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer {
+                buffer: &input_storage_buffer,
+                range: 0..input_buffer_size,
+            },
+        },
+        // output
+        wgpu::Binding {
+            binding: 1,
+            resource: wgpu::BindingResource::Buffer {
+                buffer: &output_storage_buffer,
+                range: 0..input_buffer_size,
+            },
+        },
+        // sample
+        wgpu::Binding {
+            binding: 2,
+            resource: wgpu::BindingResource::Buffer {
+                buffer: &current_sample_storage_buffer,
+                range: 0..std::mem::size_of::<SampleInfo>() as wgpu::BufferAddress,
+            },
+        },
+    ];
+
+    let mut offs = 0;
+    // scene info
+    for (i, subbuffer_size) in scene_subbuffer_sizes.iter().enumerate() {
+        bindings.push(
+            wgpu::Binding {
+                binding: 3+i as u32,
+                resource: wgpu::BindingResource::Buffer {
+                    buffer: &scene_storage_buffer,
+                    range: offs as wgpu::BufferAddress..(offs+subbuffer_size) as wgpu::BufferAddress,
+                },
+            }
+        );
+        offs += subbuffer_size;
+    }
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         layout: &bind_group_layout,
-        bindings: &[
-            // input
-            wgpu::Binding {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer {
-                    buffer: &input_storage_buffer,
-                    range: 0..input_buffer_size,
-                },
-            },
-            // scene
-            wgpu::Binding {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer {
-                    buffer: &scene_storage_buffer,
-                    range: 0..scene_buffer_size,
-                },
-            },
-            // sample
-            wgpu::Binding {
-                binding: 2,
-                resource: wgpu::BindingResource::Buffer {
-                    buffer: &current_sample_storage_buffer,
-                    range: 0..std::mem::size_of::<SampleInfo>() as wgpu::BufferAddress,
-                },
-            },
-            // output
-            wgpu::Binding {
-                binding: 3,
-                resource: wgpu::BindingResource::Buffer {
-                    buffer: &output_storage_buffer,
-                    range: 0..input_buffer_size,
-                },
-            },
-        ],
+        bindings: &bindings[..],
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -322,9 +550,9 @@ fn main() {
     );
     queue.submit(&[encoder.finish()]);
 
-
     for sample_ix in 0..samples.len() {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
         encoder.copy_buffer_to_buffer(
             &sample_staging_buffer,
             (sample_ix * std::mem::size_of::<SampleInfo>()) as wgpu::BufferAddress,
@@ -354,6 +582,7 @@ fn main() {
     input_staging_buffer.map_read_async(
         0,
         input_buffer_size,
+        // here we don't want to use vec4 because of OpenEXR
         move |result: wgpu::BufferMapAsyncResult<&[[f32; 4]]>| {
             if let Ok(mapping) = result {
                 let pixels = mapping.data;

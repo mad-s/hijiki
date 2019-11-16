@@ -8,17 +8,79 @@ layout(set = 0, binding = 0) buffer Input {
 	vec4 inputDirection[];
 };
 
-layout(set = 0, binding = 3) buffer Output {
+layout(set = 0, binding = 1) buffer Output {
 	vec4 outputColor[];
 };
 
-// TODO: structure packing
+struct SampleInfo {
+	uint index;
+	float weight;
+	vec2 sampleOffset;
+};
+layout(set = 0, binding = 2) buffer CurrentSampleInfo {
+	SampleInfo currentSampleInfo;
+};
+
+struct Camera {
+	vec3 position;
+	float fov;
+};
+layout(set = 0, binding = 3) buffer SceneBufferInfo {
+	Camera camera;
+	int numSpheres;
+	int numPlanes;
+
+	int numDiffuse;
+	int numMirrors;
+	int numDielectric;
+	int numEmitters;
+};
+
 struct Sphere {
-	vec4 position;
-	vec4 diffuse;
-	vec4 emissive;
-	float r;
-	uint materialId;
+	vec4 positionRadius;
+};
+layout(set = 0, binding = 4) buffer Spheres {
+	Sphere spheres[];
+};
+
+struct Plane {
+	vec4 normalOffset;
+};
+layout(set = 0, binding = 5) buffer Planes {
+	Plane planes[];
+};
+
+layout(set = 0, binding = 6) buffer Materials {
+	uint materials[];
+};
+
+struct DiffuseMaterial {
+	vec3 color;
+};
+layout(set = 0, binding = 7) buffer DiffuseMaterials {
+	 DiffuseMaterial diffuseMaterials;
+};
+
+struct MirrorMaterial {
+	vec4 dummy;
+};
+layout(set = 0, binding = 8) buffer MirrorMaterials {
+	 MirrorMaterial mirrorMaterials;
+};
+
+struct DielectricMaterial {
+	float etaRatio;
+	float pad[3];
+};
+layout(set = 0, binding = 9) buffer DielectricMaterials {
+	 DielectricMaterial dielectricMaterials;
+};
+
+struct EmissiveMaterial {
+	vec3 power;
+};
+layout(set = 0, binding = 10) buffer EmissiveMaterials {
+	 EmissiveMaterial emissiveMaterials;
 };
 
 struct Ray {
@@ -37,29 +99,25 @@ struct Intersection {
 	vec2 uv;
 };
 
-struct SampleInfo {
-	uint index;
-	float weight;
-	vec2 sampleOffset;
-};
 
-layout(set = 0, binding = 1) buffer Scene {
-	Sphere spheres[];
-};
 
-layout(set = 0, binding = 2) buffer CurrentSampleInfo {
-	SampleInfo currentSampleInfo;
-};
 
 bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its);
+bool intersectPlane(Ray ray, Plane plane, inout Intersection its);
 
 // TODO: use BVH
 bool intersectScene(Ray ray, out Intersection its) {
 	its.objectID = -1;
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < numSpheres; i++) {
 		if (intersectSphere(ray, spheres[i], its)) {
 			ray.tMax = its.t - M_EPS;
 			its.objectID = i;
+		}
+	}
+	for (int i = 0; i < numPlanes; i++) {
+		if (intersectPlane(ray, planes[i], its)) {
+			ray.tMax = its.t - M_EPS;
+			its.objectID = numSpheres + i;
 		}
 	}
 	if (its.objectID == -1) {
@@ -67,14 +125,19 @@ bool intersectScene(Ray ray, out Intersection its) {
 	}
 
 	its.pos = ray.origin + its.t * ray.direction;
-	its.normal = (its.pos - spheres[its.objectID].position.xyz) / spheres[its.objectID].r;
+	if (its.objectID < numSpheres) {
+		its.normal = (its.pos - spheres[its.objectID].positionRadius.xyz) / spheres[its.objectID].positionRadius.w;
+	} else {
+		its.normal = planes[its.objectID-numSpheres].normalOffset.xyz;
+	}
+
 	return true;
 }
 
 bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its) {
-	vec3 l = ray.origin - sphere.position.xyz;
+	vec3 l = ray.origin - sphere.positionRadius.xyz;
 	float b = 2 * dot(ray.direction, l);
-	float c = dot(l, l) - sphere.r * sphere.r;
+	float c = dot(l, l) - sphere.positionRadius.r * sphere.positionRadius.r;
 	float d = b*b-4*c;
 	if (d < M_EPS) {
 		return false;
@@ -88,6 +151,17 @@ bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its) {
 	float t1 = -0.5*(b-d);
 	if (ray.tMin <= t0 && t0 <= ray.tMax) {
 		its.t = t1;
+		return true;
+	}
+	return false;
+}
+
+bool intersectPlane(Ray ray, Plane plane, inout Intersection its) {
+	vec3 n  = plane.normalOffset.xyz;
+	float a = plane.normalOffset.w;
+	float t = -(dot(ray.origin, n)+a) / dot(ray.direction, n);
+	if (ray.tMin <= t && t <= ray.tMax) {
+		its.t = t;
 		return true;
 	}
 	return false;
@@ -153,28 +227,13 @@ void main() {
 
 	vec3 total = vec3(0.);
 	Ray ray;
-	ray.origin = vec3(0.0);
+	ray.origin = camera.position;
 	ray.direction = normalize(inputDirection[index].xyz+vec3(currentSampleInfo.sampleOffset, 0.));
 	ray.tMin = M_EPS;
 	ray.tMax = 1e100;
 
 	Intersection its;
-	vec3 throughput = vec3(currentSampleInfo.weight);
 
-	for (int bounce = 0; bounce < 5; bounce++) {
-		if (!intersectScene(ray, its)) {
-			break;
-		}
-		total += throughput * spheres[its.objectID].emissive.rgb;
-		throughput *= spheres[its.objectID].diffuse.rgb;
-
-		// sample new direction
-		vec4 localToWorld = quaternionFromTo(vec3(0.,0.,1.), its.normal);
-		vec3 wo = randCosHemisphere();
-
-		ray.origin = its.pos;
-		ray.direction = quaternionRotate(wo, localToWorld);
-		ray.tMax = 1e100;
-	}
-	outputColor[index] += vec4(total, 1.0);
+	!intersectScene(ray, its);
+	outputColor[index] = vec4(its.objectID);
 }
