@@ -94,18 +94,26 @@ struct Ray {
 struct Intersection {
 	int objectID;
 	float t;
-	vec3 pos;
-	vec3 normal;
+	vec3 p;
+	vec3 n;
 	vec2 uv;
 };
 
 
 
 
+bool intersectSphere(Ray ray, Sphere sphere);
 bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its);
+bool intersectPlane(Ray ray, Plane plane);
 bool intersectPlane(Ray ray, Plane plane, inout Intersection its);
 
 // TODO: use BVH
+bool intersectScene(Ray ray, out Intersection its);
+bool intersectScene(Ray ray) {
+	// TODO: optimize
+	Intersection dummy;
+	return intersectScene(ray, dummy);
+}
 bool intersectScene(Ray ray, out Intersection its) {
 	its.objectID = -1;
 	if (numSpheres > 100 || numPlanes > 100) {
@@ -130,16 +138,30 @@ bool intersectScene(Ray ray, out Intersection its) {
 		return false;
 	}
 
-	its.pos = ray.origin + its.t * ray.direction;
+	its.p = ray.origin + its.t * ray.direction;
+	// TODO: generalize
 	if (its.objectID < numSpheres) {
-		its.normal = (its.pos - spheres[its.objectID].positionRadius.xyz) / spheres[its.objectID].positionRadius.w;
+		its.n = (its.p - spheres[its.objectID].positionRadius.xyz) / spheres[its.objectID].positionRadius.w;
 	} else {
-		its.normal = planes[its.objectID-numSpheres].normalOffset.xyz;
+		its.n = planes[its.objectID-numSpheres].normalOffset.xyz;
 	}
 
 	return true;
 }
 
+bool intersectSphere(Ray ray, Sphere sphere) {
+	vec3 pos = sphere.positionRadius.xyz;
+	float r  = sphere.positionRadius.w;
+
+	vec3 l = ray.origin - pos;
+	float b = 2 * dot(ray.direction, l);
+	float c = dot(l, l) - r*r;
+	float d = b*b-4*c;
+	if (d < M_EPS) {
+		return false;
+	}
+	return true;
+}
 bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its) {
 	vec3 pos = sphere.positionRadius.xyz;
 	float r  = sphere.positionRadius.w;
@@ -165,6 +187,15 @@ bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its) {
 	return false;
 }
 
+bool intersectPlane(Ray ray, Plane plane) {
+	vec3 n  = plane.normalOffset.xyz;
+	float a = plane.normalOffset.w;
+	float t = -(dot(ray.origin, n)+a) / dot(ray.direction, n);
+	if (ray.tMin <= t && t <= ray.tMax) {
+		return true;
+	}
+	return false;
+}
 bool intersectPlane(Ray ray, Plane plane, inout Intersection its) {
 	vec3 n  = plane.normalOffset.xyz;
 	float a = plane.normalOffset.w;
@@ -207,6 +238,16 @@ vec3 randCosHemisphere() {
 	return vec3(x, y, sqrt(max(0, 1-u)));
 }
 
+vec3 randUniformSphere() {
+	float u = randUniformFloat();
+	float v = randUniformFloat();
+
+	float z = 2.*u-1.;
+	float theta = 2*M_PI*v;
+	float r = sqrt(1-z*z);
+	return vec3(r*cos(theta), r*sin(theta), z);
+}
+
 vec4 quaternionMult(vec4 qa, vec4 qb) {
 	vec4 result;
 	result.w = qa.w*qb.w - dot(qa.xyz, qb.xyz);
@@ -227,14 +268,29 @@ vec3 quaternionRotate(vec3 v, vec4 r) {
 	return quaternionMult(tmp, r).xyz;
 }
 
+struct ShapeQueryRecord {
+	vec3 p;
+	vec3 n;
+	float pdf;
+};
+
+void sampleSphere(Sphere sphere, out ShapeQueryRecord sRec) {
+	sRec.n = randUniformSphere();
+	sRec.p = sphere.positionRadius.xyz + sphere.positionRadius.w * sRec.n;
+	sRec.pdf = 1. / (sphere.positionRadius.w * sphere.positionRadius.w * 4 * M_PI);
+}
+
+float pdfSampleSphere(Sphere sphere, ShapeQueryRecord sRec) {
+	return 1. / (sphere.positionRadius.w * sphere.positionRadius.w * 4 * M_PI);
+}
+
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	rngState = wangHash(index*65536 + currentSampleInfo.index);
 	if (currentSampleInfo.index == 0) {
 		outputColor[index] = vec4(0.);
 	}
-
-
 
 	Ray ray;
 	ray.origin = camera.position.xyz;
@@ -246,6 +302,7 @@ void main() {
 
 	vec3 total = vec3(0.);
 	vec3 throughput = vec3(currentSampleInfo.weight);
+	bool wasDiscrete = true;
 	for (int bounce = 0; bounce < 5; bounce++) {
 		if (!intersectScene(ray, its)) {
 			break;
@@ -253,23 +310,52 @@ void main() {
 
 		uint mat = materials[its.objectID];
 		if (mat < numDiffuse) {
+			// sample emitter
+			// TODO: true and flexible MIS
+			{
+				ShapeQueryRecord sRec;
+				sampleSphere(spheres[2], sRec);
+
+
+				vec3 toLight = sRec.p - its.p;
+				float r = length(toLight);
+				toLight /= r;
+				float cosTheta = dot(toLight, its.n);
+				if (cosTheta > 0) {
+					float cosThetaL = -dot(toLight, sRec.n);
+					if (cosThetaL > 0) {
+						float pdf = sRec.pdf * r*r / cosThetaL;
+
+						Ray shadowRay;
+						ray.origin = its.p;
+						ray.direction = toLight;
+						ray.tMin = M_EPS;
+						ray.tMax = r-M_EPS;
+						
+						if (!intersectScene(ray)) {
+							total += throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf;
+						}
+					}
+				}
+			}
+			wasDiscrete = false;
 			vec3 wo = randCosHemisphere();
-			vec4 localToWorld = quaternionFromTo(vec3(0.,0.,1), its.normal);
+			vec4 localToWorld = quaternionFromTo(vec3(0.,0.,1), its.n);
 			ray.direction = quaternionRotate(wo, localToWorld);
 
 			throughput *= diffuseMaterials[mat].color;
 		} else {
 			mat -= numDiffuse;
 			if (mat < numMirrors) {
-				ray.direction = reflect(ray.direction, its.normal);
+				ray.direction = reflect(ray.direction, its.n);
 			} else {
 				mat -= numMirrors;
 				if (mat < numDielectric) {
-					// unimplemented
+					// TODO: optimize
 					float eta = dielectricMaterials[mat].etaRatio;
 					float etaInv = 1. / eta;
-					float cosThetaI = -dot(its.normal, ray.direction);
-					vec3 normal = its.normal;
+					float cosThetaI = -dot(its.n, ray.direction);
+					vec3 normal = its.n;
 					if (cosThetaI < 0) {
 						eta = etaInv;
 						etaInv = 1. / eta;
@@ -280,8 +366,6 @@ void main() {
 					float k = 1.0 - etaInv*etaInv * (1-cosThetaI*cosThetaI);
 
 					if (k <= 0) {
-						//total = vec3(currentSampleInfo.weight * bounce);
-						//break;
 						// reflect
 						ray.direction = reflect(ray.direction, normal);
 					} else {
@@ -303,13 +387,15 @@ void main() {
 				} else {
 					mat -= numDielectric;
 					// emitters
-					total += throughput * emissiveMaterials[mat].power;
+					if (wasDiscrete) {
+						total += throughput * emissiveMaterials[mat].power;
+					}
 					break;
 				}
 			}
 		}
 
-		ray.origin = its.pos;
+		ray.origin = its.p;
 		ray.tMax = 1e100;
 	}
 

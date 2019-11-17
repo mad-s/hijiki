@@ -314,7 +314,7 @@ fn main() {
         .collect();
     let input_buffer_size = (inputs.len() * std::mem::size_of::<Vec4>()) as wgpu::BufferAddress;
 
-    let num_samples = 512;
+    let num_samples = 16;
     let samples: Vec<SampleInfo> = (0..num_samples)
         .map(|i| SampleInfo {
             id: i,
