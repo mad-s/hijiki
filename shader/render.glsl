@@ -22,7 +22,7 @@ layout(set = 0, binding = 2) buffer CurrentSampleInfo {
 };
 
 struct Camera {
-	vec3 position;
+	vec4 position;
 	float fov;
 };
 layout(set = 0, binding = 3) buffer SceneBufferInfo {
@@ -58,14 +58,14 @@ struct DiffuseMaterial {
 	vec3 color;
 };
 layout(set = 0, binding = 7) buffer DiffuseMaterials {
-	 DiffuseMaterial diffuseMaterials;
+	 DiffuseMaterial diffuseMaterials[];
 };
 
 struct MirrorMaterial {
 	vec4 dummy;
 };
 layout(set = 0, binding = 8) buffer MirrorMaterials {
-	 MirrorMaterial mirrorMaterials;
+	 MirrorMaterial mirrorMaterials[];
 };
 
 struct DielectricMaterial {
@@ -73,14 +73,14 @@ struct DielectricMaterial {
 	float pad[3];
 };
 layout(set = 0, binding = 9) buffer DielectricMaterials {
-	 DielectricMaterial dielectricMaterials;
+	 DielectricMaterial dielectricMaterials[];
 };
 
 struct EmissiveMaterial {
 	vec3 power;
 };
 layout(set = 0, binding = 10) buffer EmissiveMaterials {
-	 EmissiveMaterial emissiveMaterials;
+	 EmissiveMaterial emissiveMaterials[];
 };
 
 struct Ray {
@@ -108,6 +108,11 @@ bool intersectPlane(Ray ray, Plane plane, inout Intersection its);
 // TODO: use BVH
 bool intersectScene(Ray ray, out Intersection its) {
 	its.objectID = -1;
+	if (numSpheres > 100 || numPlanes > 100) {
+		// failsafe
+		return false;
+	}
+
 	for (int i = 0; i < numSpheres; i++) {
 		if (intersectSphere(ray, spheres[i], its)) {
 			ray.tMax = its.t - M_EPS;
@@ -120,6 +125,7 @@ bool intersectScene(Ray ray, out Intersection its) {
 			its.objectID = numSpheres + i;
 		}
 	}
+	
 	if (its.objectID == -1) {
 		return false;
 	}
@@ -135,9 +141,12 @@ bool intersectScene(Ray ray, out Intersection its) {
 }
 
 bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its) {
-	vec3 l = ray.origin - sphere.positionRadius.xyz;
+	vec3 pos = sphere.positionRadius.xyz;
+	float r  = sphere.positionRadius.w;
+
+	vec3 l = ray.origin - pos;
 	float b = 2 * dot(ray.direction, l);
-	float c = dot(l, l) - sphere.positionRadius.r * sphere.positionRadius.r;
+	float c = dot(l, l) - r*r;
 	float d = b*b-4*c;
 	if (d < M_EPS) {
 		return false;
@@ -225,15 +234,84 @@ void main() {
 		outputColor[index] = vec4(0.);
 	}
 
-	vec3 total = vec3(0.);
+
+
 	Ray ray;
-	ray.origin = camera.position;
+	ray.origin = camera.position.xyz;
 	ray.direction = normalize(inputDirection[index].xyz+vec3(currentSampleInfo.sampleOffset, 0.));
 	ray.tMin = M_EPS;
 	ray.tMax = 1e100;
-
 	Intersection its;
 
-	!intersectScene(ray, its);
-	outputColor[index] = vec4(its.objectID);
+
+	vec3 total = vec3(0.);
+	vec3 throughput = vec3(currentSampleInfo.weight);
+	for (int bounce = 0; bounce < 5; bounce++) {
+		if (!intersectScene(ray, its)) {
+			break;
+		}
+
+		uint mat = materials[its.objectID];
+		if (mat < numDiffuse) {
+			vec3 wo = randCosHemisphere();
+			vec4 localToWorld = quaternionFromTo(vec3(0.,0.,1), its.normal);
+			ray.direction = quaternionRotate(wo, localToWorld);
+
+			throughput *= diffuseMaterials[mat].color;
+		} else {
+			mat -= numDiffuse;
+			if (mat < numMirrors) {
+				ray.direction = reflect(ray.direction, its.normal);
+			} else {
+				mat -= numMirrors;
+				if (mat < numDielectric) {
+					// unimplemented
+					float eta = dielectricMaterials[mat].etaRatio;
+					float etaInv = 1. / eta;
+					float cosThetaI = -dot(its.normal, ray.direction);
+					vec3 normal = its.normal;
+					if (cosThetaI < 0) {
+						eta = etaInv;
+						etaInv = 1. / eta;
+						normal = -normal;
+						cosThetaI = -cosThetaI;
+					}
+
+					float k = 1.0 - etaInv*etaInv * (1-cosThetaI*cosThetaI);
+
+					if (k <= 0) {
+						//total = vec3(currentSampleInfo.weight * bounce);
+						//break;
+						// reflect
+						ray.direction = reflect(ray.direction, normal);
+					} else {
+						float cosThetaO = sqrt(k);
+
+						float rho_par  = (eta*cosThetaI-cosThetaO)/(eta*cosThetaI+cosThetaO);
+						float rho_orth = (cosThetaI-eta*cosThetaO)/(cosThetaI+eta*cosThetaO);
+
+						float f_r = 0.5 * (rho_par*rho_par + rho_orth*rho_orth);
+						if (randUniformFloat() < f_r) {
+							ray.direction = reflect(ray.direction, normal);
+						} else {
+							vec3 parallel = ray.direction - dot(ray.direction, normal) * normal;
+							// refract
+							ray.direction = etaInv * parallel - sqrt(k) * normal;
+						}
+						
+					}
+				} else {
+					mat -= numDielectric;
+					// emitters
+					total += throughput * emissiveMaterials[mat].power;
+					break;
+				}
+			}
+		}
+
+		ray.origin = its.pos;
+		ray.tMax = 1e100;
+	}
+
+	outputColor[index] += vec4(total, 0.);
 }

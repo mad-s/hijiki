@@ -225,26 +225,27 @@ fn main() {
             },
             Sphere {
                 // light sphere
-                position_radius: vec4(0., 1.25, 0., 0.3263),
+                position_radius: vec4(0., 1.25, 0., 0.2),
+                //position_radius: vec4(-0.1, 1.0, 0.376700, 0.3263),
             },
         ],
         planes: vec![
             Plane {
                 normal_offset: vec4(
                     // right wall pointing to the left
-                    -1., 0., 0., -1.,
+                    -1., 0., 0., 1.,
                 ),
             },
             Plane {
                 normal_offset: vec4(
                     // left wall pointing to the right
-                    1., 0., 0., -1.,
+                    1., 0., 0., 1.,
                 ),
             },
             Plane {
                 normal_offset: vec4(
                     // ceiling
-                    0., -1.0, 0., -1.59,
+                    0., -1.0, 0., 1.59,
                 ),
             },
             Plane {
@@ -256,7 +257,7 @@ fn main() {
             Plane {
                 normal_offset: vec4(
                     // back
-                    0., 0., 1.0, -1.04,
+                    0., 0., 1.0, 1.04,
                 ),
             },
         ],
@@ -290,20 +291,20 @@ fn main() {
             eta_ratio: 1.5,
         }],
         emitters: vec![EmitterMaterial {
-            power: vec3(1., 1., 1.), // material 5: white emitter
+            power: vec3(10., 10., 10.), // material 5: white emitter
         }],
     };
 
-    let width = 1;
-    let height = 1;
+    let width = 800;
+    let height = 600;
 
-    let fov_factor: f32 = (scene.camera.fov / 2.).tan() * height as f32 / 2.;
+    let fov_factor: f32 = (scene.camera.fov / 2.).to_radians().tan() / (height as f32 / 2.);
 
     let inputs: Vec<Vec4> = (0..height)
         .flat_map(move |y| {
             (0..width).map(move |x| {
                 vec4(
-                    -(x as f32 - 0.5 * width as f32) * fov_factor,
+                    (x as f32 - 0.5 * width as f32) * fov_factor,
                     -(y as f32 - 0.5 * height as f32) * fov_factor,
                     -1.0,
                     0.0,
@@ -313,7 +314,7 @@ fn main() {
         .collect();
     let input_buffer_size = (inputs.len() * std::mem::size_of::<Vec4>()) as wgpu::BufferAddress;
 
-    let num_samples = 1;
+    let num_samples = 512;
     let samples: Vec<SampleInfo> = (0..num_samples)
         .map(|i| SampleInfo {
             id: i,
@@ -551,6 +552,7 @@ fn main() {
     queue.submit(&[encoder.finish()]);
 
     for sample_ix in 0..samples.len() {
+        println!("sample {}", sample_ix);
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
         encoder.copy_buffer_to_buffer(
