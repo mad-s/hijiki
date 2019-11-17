@@ -29,13 +29,22 @@ fn load_shader(
         }
 
         let glsl = std::fs::read_to_string(file).unwrap();
+        let mut compile_options = shaderc::CompileOptions::new().unwrap();
+        compile_options.set_include_callback(|file, _include_type, _source_file, _depth| {
+            let file = std::path::Path::new("shader").join(file);
+            let code = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+            Ok(shaderc::ResolvedInclude {
+                resolved_name: file.to_string_lossy().into_owned(),
+                content: code,
+            })
+        });
         let compiled = compiler
             .compile_into_spirv(
                 &glsl,
                 shaderc::ShaderKind::InferFromSource,
                 file.file_name().unwrap().to_str().unwrap(),
                 "main",
-                None,
+                Some(&compile_options),
             )
             .unwrap_or_else(|err| match err {
                 shaderc::Error::CompilationError(_, s) => panic!("{}", s),
