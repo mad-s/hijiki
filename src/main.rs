@@ -7,6 +7,9 @@ extern crate rand;
 mod glm;
 use glm::*;
 
+mod shape;
+use shape::*;
+
 fn load_shader(
     compiler: &mut shaderc::Compiler,
     device: &wgpu::Device,
@@ -63,18 +66,6 @@ fn load_shader(
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
-struct Sphere {
-    position_radius: Vec4,
-}
-
-#[repr(C, align(16))]
-#[derive(Debug, Clone, Copy)]
-struct Plane {
-    normal_offset: Vec4,
-}
-
-#[repr(C, align(16))]
-#[derive(Debug, Clone, Copy)]
 struct DiffuseMaterial {
     color: Vec3,
 }
@@ -99,6 +90,12 @@ struct EmitterMaterial {
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
+struct PortalMaterial {
+    transform: Mat4,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
 struct Camera {
     position: Vec3,
     fov: f32,
@@ -109,12 +106,14 @@ struct Scene {
 
     spheres: Vec<Sphere>,
     planes: Vec<Plane>,
+    quads: Vec<Quad>,
     materials: Vec<u32>,
 
     diffuse: Vec<DiffuseMaterial>,
     mirrors: Vec<MirrorMaterial>,
     dielectric: Vec<DielectricMaterial>,
     emitters: Vec<EmitterMaterial>,
+    portals: Vec<PortalMaterial>,
 }
 
 #[repr(C, align(16))]
@@ -123,48 +122,58 @@ struct SceneBufferInfo {
     camera: Camera,
     num_spheres: u32,
     num_planes: u32,
+    num_quads: u32,
 
     num_diffuse: u32,
     num_mirrors: u32,
     num_dielectric: u32,
     num_emitters: u32,
+    num_portals: u32,
 }
 
-const BUFFER_ALIGNMENT : usize = 256;
+const BUFFER_ALIGNMENT: usize = 256;
 
 impl Scene {
     fn subbuffer_sizes(&self) -> Vec<usize> {
-        assert_eq!(self.spheres.len() + self.planes.len(), self.materials.len());
+        assert_eq!(self.spheres.len() + self.planes.len() + self.quads.len(), self.materials.len());
         vec![
             std::mem::size_of::<SceneBufferInfo>(),
             self.spheres.len() * std::mem::size_of::<Sphere>(),
             self.planes.len() * std::mem::size_of::<Plane>(),
+            self.quads.len() * std::mem::size_of::<Quad>(),
             self.materials.len() * std::mem::size_of::<u32>(), // align to 16 bytes
             self.diffuse.len() * std::mem::size_of::<DiffuseMaterial>(),
             self.mirrors.len() * std::mem::size_of::<MirrorMaterial>(),
             self.dielectric.len() * std::mem::size_of::<DielectricMaterial>(),
             self.emitters.len() * std::mem::size_of::<EmitterMaterial>(),
-        ].iter().map(|size| (size + BUFFER_ALIGNMENT-1) & !(BUFFER_ALIGNMENT-1)).collect()
+            self.portals.len() * std::mem::size_of::<PortalMaterial>(),
+        ]
+        .iter()
+        .map(|size| (size + BUFFER_ALIGNMENT - 1) & !(BUFFER_ALIGNMENT - 1))
+        .collect()
     }
 
     fn write_to_buffer(&self, mut buffer: &mut [u8]) {
-        assert_eq!(self.spheres.len() + self.planes.len(), self.materials.len());
+        assert_eq!(self.spheres.len() + self.planes.len() + self.quads.len(), self.materials.len());
 
         let info = SceneBufferInfo {
             camera: self.camera,
             num_spheres: self.spheres.len() as u32,
             num_planes: self.planes.len() as u32,
+            num_quads: self.quads.len() as u32,
 
             num_diffuse: self.diffuse.len() as u32,
             num_mirrors: self.mirrors.len() as u32,
             num_dielectric: self.dielectric.len() as u32,
             num_emitters: self.emitters.len() as u32,
+            num_portals: self.portals.len() as u32,
         };
 
         println!("{} bytes left", buffer.len());
         unsafe fn put<T: Copy>(buffer: &mut &mut [u8], data: &[T]) {
             let len = buffer.len();
-            let size = (data.len() * std::mem::size_of::<T>() + BUFFER_ALIGNMENT-1) & !(BUFFER_ALIGNMENT-1); // align to buffer size
+            let size = (data.len() * std::mem::size_of::<T>() + BUFFER_ALIGNMENT - 1)
+                & !(BUFFER_ALIGNMENT - 1); // align to buffer size
             println!("putting {} bytes", size);
             assert!(len >= size);
             let ptr = buffer.as_mut_ptr() as *mut T;
@@ -177,12 +186,14 @@ impl Scene {
             put(&mut buffer, std::slice::from_ref(&info));
             put(&mut buffer, &self.spheres[..]);
             put(&mut buffer, &self.planes[..]);
+            put(&mut buffer, &self.quads[..]);
             put(&mut buffer, &self.materials[..]);
 
             put(&mut buffer, &self.diffuse[..]);
             put(&mut buffer, &self.mirrors[..]);
             put(&mut buffer, &self.dielectric[..]);
             put(&mut buffer, &self.emitters[..]);
+            put(&mut buffer, &self.portals[..]);
         }
 
         assert!(buffer.is_empty()); // we filled the buffer
@@ -232,11 +243,11 @@ fn main() {
                 // glass sphere
                 position_radius: vec4(0.445800, 0.332100, 0.376700, 0.3263),
             },
-            Sphere {
+            /*Sphere {
                 // light sphere
-                position_radius: vec4(0., 1.25, 0., 0.2),
+                position_radius: vec4(-0.6, 1.25, 0., 0.2),
                 //position_radius: vec4(-0.1, 1.0, 0.376700, 0.3263),
-            },
+            },*/
         ],
         planes: vec![
             Plane {
@@ -270,26 +281,34 @@ fn main() {
                 ),
             },
         ],
+        quads: vec![
+            Quad {
+                origin: vec3(-0.24, 1.58, -0.22),
+                edge1: vec3(0.24+0.23, 0., 0.),
+                edge2: vec3(0., 0., 0.22+0.16),
+            }
+        ],
         materials: vec![
             3, // mirror sphere
             4, // glass sphere,
-            5, // emissive sphere
+            //5, // emissive sphere
             2, // right wall
             1, // left wall,
             0, // ceiling
             0, // floor
             0, // back
+            5, // emissive quad
         ],
 
         diffuse: vec![
             DiffuseMaterial {
-                color: vec3(0.5, 0.5, 0.5),
+                color: vec3(0.725, 0.71, 0.68),
             }, // material 0: white diffuse
             DiffuseMaterial {
-                color: vec3(0.5, 0.0, 0.0),
+                color: vec3(0.630, 0.065, 0.05),
             }, // material 1: red diffuse
             DiffuseMaterial {
-                color: vec3(0.0, 0.0, 0.5),
+                color: vec3(0.161, 0.133, 0.427),
             }, // material 2: blue diffuse
         ],
         mirrors: vec![
@@ -297,15 +316,44 @@ fn main() {
         ],
         dielectric: vec![DielectricMaterial {
             // material 4: glass
-            eta_ratio: 1.5,
+            eta_ratio: 1.5046,
         }],
-        emitters: vec![EmitterMaterial {
-            power: vec3(10., 10., 10.), // material 5: white emitter
-        }],
+        emitters: vec![
+            EmitterMaterial {
+                power: vec3(15., 15., 15.), // material 5: white emitter
+            },
+            EmitterMaterial {
+                power: vec3(0., 0., 0.), // material 6: black hole
+            },
+        ],
+        portals: vec![
+            /*
+            PortalMaterial {
+                transform: Mat4 {
+                    data: [
+                        1., 0., 0., 0., // +x maps to +x
+                        0., 1., 0., 1., // +y maps to +y
+                        0., 0., 1., 1., // +z maps to +z
+                        -2.,0., 0., 1., // map x=+1 to x=-1 => x += -2
+                    ]
+                },
+            },
+            PortalMaterial {
+                transform: Mat4 {
+                    data: [
+                        0.75, 0., 0., 0., // +x maps to +x
+                        0., 0.75, 0., 1., // +y maps to +y
+                        0., 0., 0.75, 1., // +z maps to +z
+                        2., 0., 0., 1., // map x=-1 to x=+1 => x += 2
+                    ]
+                },
+            }
+            */
+        ],
     };
 
-    let width = 800;
-    let height = 600;
+    let width = 400;
+    let height = 300;
 
     let fov_factor: f32 = (scene.camera.fov / 2.).to_radians().tan() / (height as f32 / 2.);
 
@@ -323,7 +371,7 @@ fn main() {
         .collect();
     let input_buffer_size = (inputs.len() * std::mem::size_of::<Vec4>()) as wgpu::BufferAddress;
 
-    let num_samples = 16;
+    let num_samples = 256;
     let samples: Vec<SampleInfo> = (0..num_samples)
         .map(|i| SampleInfo {
             id: i,
@@ -468,16 +516,14 @@ fn main() {
     ];
     // scene info
     for (i, _subbuffer_size) in scene_subbuffer_sizes.iter().enumerate() {
-        bindings.push(
-            wgpu::BindGroupLayoutBinding {
-                binding: 3+i as u32,
-                visibility: wgpu::ShaderStage::COMPUTE,
-                ty: wgpu::BindingType::StorageBuffer {
-                    dynamic: false,
-                    readonly: false,
-                },
-            }
-        );
+        bindings.push(wgpu::BindGroupLayoutBinding {
+            binding: 3 + i as u32,
+            visibility: wgpu::ShaderStage::COMPUTE,
+            ty: wgpu::BindingType::StorageBuffer {
+                dynamic: false,
+                readonly: false,
+            },
+        });
     }
 
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -514,15 +560,13 @@ fn main() {
     let mut offs = 0;
     // scene info
     for (i, subbuffer_size) in scene_subbuffer_sizes.iter().enumerate() {
-        bindings.push(
-            wgpu::Binding {
-                binding: 3+i as u32,
-                resource: wgpu::BindingResource::Buffer {
-                    buffer: &scene_storage_buffer,
-                    range: offs as wgpu::BufferAddress..(offs+subbuffer_size) as wgpu::BufferAddress,
-                },
-            }
-        );
+        bindings.push(wgpu::Binding {
+            binding: 3 + i as u32,
+            resource: wgpu::BindingResource::Buffer {
+                buffer: &scene_storage_buffer,
+                range: offs as wgpu::BufferAddress..(offs + subbuffer_size) as wgpu::BufferAddress,
+            },
+        });
         offs += subbuffer_size;
     }
 

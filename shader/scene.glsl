@@ -2,11 +2,13 @@ layout(set = 0, binding = 3) buffer SceneBufferInfo {
 	Camera camera;
 	int numSpheres;
 	int numPlanes;
+	int numQuads;
 
 	int numDiffuse;
 	int numMirrors;
 	int numDielectric;
 	int numEmitters;
+	int numPortals;
 };
 
 layout(set = 0, binding = 4) buffer Spheres {
@@ -16,8 +18,11 @@ layout(set = 0, binding = 4) buffer Spheres {
 layout(set = 0, binding = 5) buffer Planes {
 	Plane planes[];
 };
+layout(set = 0, binding = 6) buffer Quads {
+	Quad quads[];
+};
 
-layout(set = 0, binding = 6) buffer Materials {
+layout(set = 0, binding = 7) buffer Materials {
 	uint materials[];
 };
 
@@ -47,6 +52,12 @@ bool intersectScene(Ray ray, out Intersection its) {
 			its.objectID = numSpheres + i;
 		}
 	}
+	for (int i = 0; i < numQuads; i++) {
+		if (intersectQuad(ray, quads[i], its)) {
+			ray.tMax = its.t - M_EPS;
+			its.objectID = numSpheres + numPlanes + i;
+		}
+	}
 	
 	if (its.objectID == -1) {
 		return false;
@@ -57,7 +68,12 @@ bool intersectScene(Ray ray, out Intersection its) {
 	if (its.objectID < numSpheres) {
 		its.n = (its.p - spheres[its.objectID].positionRadius.xyz) / spheres[its.objectID].positionRadius.w;
 	} else {
-		its.n = planes[its.objectID-numSpheres].normalOffset.xyz;
+		if (its.objectID < numSpheres + numPlanes) {
+			its.n = planes[its.objectID-numSpheres].normalOffset.xyz;
+		} else {
+			Quad quad = quads[its.objectID-numSpheres-numPlanes];
+			its.n = normalize(cross(quad.edge1,quad.edge2));
+		}
 	}
 
 	return true;

@@ -33,7 +33,7 @@ bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its) {
 		return true;
 	}
 	float t1 = -0.5*(b-d);
-	if (ray.tMin <= t0 && t0 <= ray.tMax) {
+	if (ray.tMin <= t1 && t1 <= ray.tMax) {
 		its.t = t1;
 		return true;
 	}

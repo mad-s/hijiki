@@ -37,6 +37,7 @@ struct ShapeQueryRecord {
 
 #include "shapes/sphere.glsl"
 #include "shapes/plane.glsl"
+#include "shapes/quad.glsl"
 
 #include "scene.glsl"
 
@@ -44,6 +45,7 @@ struct ShapeQueryRecord {
 #include "materials/mirror.glsl"
 #include "materials/dielectric.glsl"
 #include "materials/emissive.glsl"
+#include "materials/portal.glsl"
 
 #include "material.glsl"
 
@@ -83,20 +85,28 @@ void main() {
 
 
 	vec3 total = vec3(0.);
-	vec3 throughput = vec3(currentSampleInfo.weight);
+	vec3 throughput = vec3(1.);
 	bool wasDiscrete = true;
-	for (int bounce = 0; bounce < 5; bounce++) {
+	for (int bounce = 0; bounce < 100; bounce++) {
 		if (!intersectScene(ray, its)) {
 			break;
 		}
 
+
 		uint mat = materials[its.objectID];
+
+		//outputColor[index] = vec4(its.objectID, mat, 0., 0.);
+		//return;
+		
+		bool wasPortal = false;
 		if (mat < numDiffuse) {
 			// sample emitter
 			// TODO: true and flexible MIS
+			
 			{
 				ShapeQueryRecord sRec;
-				sampleSphere(spheres[2], sRec);
+				//sampleSphere(spheres[2], sRec);
+				sampleQuad(quads[0], sRec);
 
 
 				vec3 toLight = sRec.p - its.p;
@@ -116,9 +126,14 @@ void main() {
 						
 						if (!intersectScene(ray)) {
 							total += throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf;
+							//outputColor[index] = vec4(diffuseMaterials[mat].color * emissiveMaterials[0].power, 0.);
+							//outputColor[index] = vec4(16 * throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf, 0.);
+							//return;
 						}
 					}
 				}
+				//outputColor[index] = vec4(0.,0.,0., 0.);
+				//return;
 			}
 			wasDiscrete = false;
 			vec3 wo = randCosHemisphere();
@@ -168,18 +183,35 @@ void main() {
 					}
 				} else {
 					mat -= numDielectric;
-					// emitters
-					if (wasDiscrete) {
-						total += throughput * emissiveMaterials[mat].power;
+					if (mat < numEmitters) {
+						// emitters
+						if (wasDiscrete) {
+							total += throughput * emissiveMaterials[mat].power;
+						}
+						break;
+					} else {
+						mat -= numEmitters;
+						ray.direction = normalize((portalMaterials[mat].transform * vec4(ray.direction, 0)).xyz);
+						ray.origin    = (portalMaterials[mat].transform * vec4(its.p, 1)).xyz;
+						wasPortal = true;
 					}
-					break;
 				}
 			}
+			wasDiscrete = true;
 		}
 
-		ray.origin = its.p;
+		if (!wasPortal) {
+			ray.origin = its.p;
+		}
 		ray.tMax = 1e100;
+
+		float q = min(0.9, max(throughput.r, max(throughput.g, throughput.b)));
+		if (randUniformFloat() > q) {
+			break;
+		} else {
+			throughput /= q;
+		}
 	}
 
-	outputColor[index] += vec4(total, 0.);
+	outputColor[index] += currentSampleInfo.weight * vec4(total, 0.);
 }
