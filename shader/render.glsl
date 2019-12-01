@@ -69,9 +69,7 @@ layout(set = 0, binding = 0) buffer CurrentImageBlock {
 	ImageBlock currentImageBlock;
 };
 
-layout(RGBA32F, set=0, binding=1) uniform image2D outputImage;
-
-
+layout(RGBA32F, set=0, binding=1) uniform image2DArray outputImage;
 
 void main() {
 	uvec2 local  = uvec2(gl_GlobalInvocationID.xy);
@@ -88,6 +86,10 @@ void main() {
 
 
 	vec3 total = vec3(0.);
+	bool hasAlbedo = false;
+	vec3 albedo = vec3(0.);
+	float depth = 0;
+	vec3 normal = vec3(0);
 	vec3 throughput = vec3(1.);
 	bool wasDiscrete = true;
 	for (int bounce = 0; bounce < 100; bounce++) {
@@ -95,12 +97,19 @@ void main() {
 		if (!intersectScene(ray, its)) {
 			break;
 		}
-
+		if (bounce == 0) {
+			depth  = its.t;
+			normal = its.n;
+		}
 
 		uint mat = materials[its.objectID];
 
 		bool wasPortal = false;
 		if (mat < numDiffuse) {
+			if (!hasAlbedo) {
+				albedo = diffuseMaterials[mat].color;
+				hasAlbedo = true;
+			}
 			// sample emitter
 			// TODO: true and flexible MIS
 			
@@ -208,5 +217,8 @@ void main() {
 		}
 	}
 
-	imageStore(outputImage, ivec2(local), vec4(total, 1));
+	imageStore(outputImage, ivec3(local, 0), vec4(total, 1.));
+	imageStore(outputImage, ivec3(local, 1), vec4(normal, depth));
+	imageStore(outputImage, ivec3(local, 2), vec4(albedo, 0.));
+	// TODO: normal
 }

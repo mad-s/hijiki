@@ -334,7 +334,7 @@ impl IntegratorPipeline {
                 visibility: wgpu::ShaderStage::COMPUTE,
 
                 ty: wgpu::BindingType::StorageTexture {
-                    dimension: wgpu::TextureViewDimension::D2,
+                    dimension: wgpu::TextureViewDimension::D2Array,
                 },
             },
         ];
@@ -449,7 +449,7 @@ impl ReconstructionPipeline {
                     visibility: wgpu::ShaderStage::COMPUTE,
 
                     ty: wgpu::BindingType::StorageTexture {
-                        dimension: wgpu::TextureViewDimension::D2,
+                        dimension: wgpu::TextureViewDimension::D2Array,
                     },
                 },
                 wgpu::BindGroupLayoutBinding {
@@ -566,7 +566,7 @@ impl Renderer {
                 height: block_size,
                 depth: 1,
             },
-            array_layer_count: 1,
+            array_layer_count: 3,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -689,7 +689,7 @@ impl Renderer {
             );
             self.integrator_pipeline.run(&block, &mut encoder);
             self.reconstruction_pipeline.run(&block, &mut encoder);
-            if block.id % 16 == 0 {
+            if block.id % 1 == 0 {
                 let next_encoder = self
                     .gpu
                     .device
@@ -873,7 +873,7 @@ fn main() {
         portals: vec![],
     };
 
-    let block_generator = ImageBlockGenerator::new(800, 600, 128, 128);
+    let block_generator = ImageBlockGenerator::new(800, 600, 128, 32);
     let mut renderer = Renderer::new(scene, block_generator);
     renderer.render();
     renderer.save_image("/tmp/output.exr");
