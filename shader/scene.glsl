@@ -1,4 +1,4 @@
-layout(set = 0, binding = 3) buffer SceneBufferInfo {
+layout(set = 0, binding = 2) buffer SceneBufferInfo {
 	Camera camera;
 	int numSpheres;
 	int numPlanes;
@@ -11,18 +11,18 @@ layout(set = 0, binding = 3) buffer SceneBufferInfo {
 	int numPortals;
 };
 
-layout(set = 0, binding = 4) buffer Spheres {
+layout(set = 0, binding = 3) buffer Spheres {
 	Sphere spheres[];
 };
 
-layout(set = 0, binding = 5) buffer Planes {
+layout(set = 0, binding = 4) buffer Planes {
 	Plane planes[];
 };
-layout(set = 0, binding = 6) buffer Quads {
+layout(set = 0, binding = 5) buffer Quads {
 	Quad quads[];
 };
 
-layout(set = 0, binding = 7) buffer Materials {
+layout(set = 0, binding = 6) buffer Materials {
 	uint materials[];
 };
 

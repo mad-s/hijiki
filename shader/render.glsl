@@ -1,8 +1,7 @@
 #version 450
 #pragma shader_stage(compute)
 
-#define M_PI 3.1415926535897932384626433832795
-#define M_EPS 1e-5
+#include "math.glsl"
 
 #include "rand.glsl"
 
@@ -10,8 +9,10 @@
 
 struct Camera {
 	vec4 position;
+	vec4 rotation;
 	float fov;
 };
+
 
 struct Ray {
 	vec3 origin;
@@ -19,6 +20,18 @@ struct Ray {
 	float tMin;
 	float tMax;
 };
+
+Ray getCameraRayAt(Camera c, vec2 x, vec2 dimension) {
+	x = x - 0.5 * dimension;
+	x = x * tan(radians(0.5*c.fov)) / (0.5*dimension.y);
+
+	Ray res;
+	res.origin = c.position.xyz;
+	res.direction = normalize(vec3(x.x, -x.y, -1.0)); // TODO: camera rotation
+	res.tMin = M_EPS;
+	res.tMax = 1e100;
+	return res;
+}
 
 // result of a ray-object intersection
 struct Intersection {
@@ -49,38 +62,28 @@ struct ShapeQueryRecord {
 
 #include "material.glsl"
 
+#include "block.glsl"
 
-layout(set = 0, binding = 0) buffer Input {
-	vec4 inputDirection[];
-};
 
-layout(set = 0, binding = 1) buffer Output {
-	vec4 outputColor[];
+layout(set = 0, binding = 0) buffer CurrentImageBlock {
+	ImageBlock currentImageBlock;
 };
 
-struct SampleInfo {
-	uint index;
-	float weight;
-	vec2 sampleOffset;
-};
-layout(set = 0, binding = 2) buffer CurrentSampleInfo {
-	SampleInfo currentSampleInfo;
-};
+layout(RGBA32F, set=0, binding=1) uniform image2D outputImage;
 
 
 
 void main() {
-	uint index = gl_GlobalInvocationID.x;
-	seedRng(index*65536 + currentSampleInfo.index);
-	if (currentSampleInfo.index == 0) {
-		outputColor[index] = vec4(0.);
-	}
+	uvec2 local  = uvec2(gl_GlobalInvocationID.xy);
+	uvec2 global = local + currentImageBlock.origin;
 
-	Ray ray;
-	ray.origin = camera.position.xyz;
-	ray.direction = normalize(inputDirection[index].xyz+vec3(currentSampleInfo.sampleOffset, 0.));
-	ray.tMin = M_EPS;
-	ray.tMax = 1e100;
+	uint seed = currentImageBlock.seed + local.x + local.y*currentImageBlock.dimension.x;
+	seedRng(seed);
+
+
+	Ray ray = getCameraRayAt(camera,
+		vec2(global) + currentImageBlock.sampleOffset,
+		currentImageBlock.originalDimension);
 	Intersection its;
 
 
@@ -88,6 +91,7 @@ void main() {
 	vec3 throughput = vec3(1.);
 	bool wasDiscrete = true;
 	for (int bounce = 0; bounce < 100; bounce++) {
+
 		if (!intersectScene(ray, its)) {
 			break;
 		}
@@ -95,9 +99,6 @@ void main() {
 
 		uint mat = materials[its.objectID];
 
-		//outputColor[index] = vec4(its.objectID, mat, 0., 0.);
-		//return;
-		
 		bool wasPortal = false;
 		if (mat < numDiffuse) {
 			// sample emitter
@@ -105,7 +106,6 @@ void main() {
 			
 			{
 				ShapeQueryRecord sRec;
-				//sampleSphere(spheres[2], sRec);
 				sampleQuad(quads[0], sRec);
 
 
@@ -126,14 +126,9 @@ void main() {
 						
 						if (!intersectScene(ray)) {
 							total += throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf;
-							//outputColor[index] = vec4(diffuseMaterials[mat].color * emissiveMaterials[0].power, 0.);
-							//outputColor[index] = vec4(16 * throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf, 0.);
-							//return;
 						}
 					}
 				}
-				//outputColor[index] = vec4(0.,0.,0., 0.);
-				//return;
 			}
 			wasDiscrete = false;
 			vec3 wo = randCosHemisphere();
@@ -213,5 +208,5 @@ void main() {
 		}
 	}
 
-	outputColor[index] += currentSampleInfo.weight * vec4(total, 0.);
+	imageStore(outputImage, ivec2(local), vec4(total, 1));
 }
