@@ -1,6 +1,8 @@
 #version 450
 #pragma shader_stage(compute)
 
+layout(local_size_x=16, local_size_y=16) in;
+
 #include "math.glsl"
 
 #include "rand.glsl"
@@ -71,31 +73,20 @@ layout(set = 0, binding = 0) buffer CurrentImageBlock {
 
 layout(RGBA32F, set=0, binding=1) uniform image2DArray outputImage;
 
-void main() {
-	uvec2 local  = uvec2(gl_GlobalInvocationID.xy);
-	uvec2 global = local + currentImageBlock.origin;
-
-	uint seed = currentImageBlock.seed + local.x + local.y*currentImageBlock.dimension.x;
-	seedRng(seed);
-
-
-	Ray ray = getCameraRayAt(camera,
-		vec2(global) + currentImageBlock.sampleOffset,
-		currentImageBlock.originalDimension);
-	Intersection its;
-
-
-	vec3 total = vec3(0.);
+void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out vec3 normal) {
+	total = vec3(0.);
 	bool hasAlbedo = false;
-	vec3 albedo = vec3(0.);
-	float depth = 0;
-	vec3 normal = vec3(0);
+	albedo = vec3(0.);
+	depth = 0;
+	normal = vec3(0);
+
 	vec3 throughput = vec3(1.);
 	bool wasDiscrete = true;
-	for (int bounce = 0; bounce < 100; bounce++) {
+	Intersection its;
+	for (int bounce = 0; bounce < 1000; bounce++) {
 
 		if (!intersectScene(ray, its)) {
-			break;
+			return;
 		}
 		if (bounce == 0) {
 			depth  = its.t;
@@ -128,12 +119,12 @@ void main() {
 						float pdf = sRec.pdf * r*r / cosThetaL;
 
 						Ray shadowRay;
-						ray.origin = its.p;
-						ray.direction = toLight;
-						ray.tMin = M_EPS;
-						ray.tMax = r-M_EPS;
+						shadowRay.origin = its.p;
+						shadowRay.direction = toLight;
+						shadowRay.tMin = 2.*M_EPS;
+						shadowRay.tMax = r-M_EPS;
 						
-						if (!intersectScene(ray)) {
+						if (!intersectScene(shadowRay)) {
 							total += throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf;
 						}
 					}
@@ -148,7 +139,7 @@ void main() {
 		} else {
 			mat -= numDiffuse;
 			if (mat < numMirrors) {
-				ray.direction = reflect(ray.direction, its.n);
+				ray.direction = normalize(reflect(ray.direction, normalize(its.n)));
 			} else {
 				mat -= numMirrors;
 				if (mat < numDielectric) {
@@ -207,18 +198,45 @@ void main() {
 		if (!wasPortal) {
 			ray.origin = its.p;
 		}
+		ray.tMin = 2.*M_EPS;
 		ray.tMax = 1e100;
 
-		float q = min(0.9, max(throughput.r, max(throughput.g, throughput.b)));
-		if (randUniformFloat() > q) {
-			break;
-		} else {
-			throughput /= q;
+		if (bounce > 3) {
+			float q = min(0.99, max(throughput.r, max(throughput.g, throughput.b)));
+			if (randUniformFloat() > q) {
+				break;
+			} else {
+				throughput /= q;
+			}
 		}
 	}
+
+}
+
+void main() {
+	uvec2 local  = uvec2(gl_GlobalInvocationID.xy);
+	uvec2 global = local + currentImageBlock.origin;
+	if (any(greaterThanEqual(local, currentImageBlock.originalDimension))) {
+		return;
+	}
+
+	uint seed = currentImageBlock.seed + local.x + local.y*currentImageBlock.dimension.x;
+	seedRng(seed);
+
+
+	Ray ray = getCameraRayAt(camera,
+		vec2(global) + currentImageBlock.sampleOffset,
+		currentImageBlock.originalDimension);
+	
+	
+	vec3 total;
+	vec3 albedo;
+	float depth;
+	vec3 normal;
+	integrateRay(ray, total, albedo, depth, normal);
+
 
 	imageStore(outputImage, ivec3(local, 0), vec4(total, 1.));
 	imageStore(outputImage, ivec3(local, 1), vec4(normal, depth));
 	imageStore(outputImage, ivec3(local, 2), vec4(albedo, 0.));
-	// TODO: normal
 }

@@ -21,6 +21,7 @@ layout(RGBA32F, set=0, binding=2) uniform image2D outputImage;
 
 void main() {
 	uvec2 local = gl_GlobalInvocationID.xy-RECONSTRUCTION_RADIUS;
+	//uvec2 local = gl_GlobalInvocationID.xy;
 	uvec2 global = local + currentImageBlock.origin;
 	vec4 outputValue = imageLoad(outputImage, ivec2(global));
 	// TODO: optimize loop indices
@@ -39,11 +40,13 @@ void main() {
 			ivec2 offs = ivec2(dx, dy);
 
 			vec2 sampleOffset = offs + currentImageBlock.sampleOffset - 0.5;
+			float weight = exp(gaussFac*dot(sampleOffset, sampleOffset))-curveOffset;
+			if (weight < 0)
+				continue;
 			vec4 color_weight = imageLoad(inputImage, ivec3(local+offs, 0));
 			vec4 normal_depth = imageLoad(inputImage, ivec3(local+offs, 1));
 			vec4 albedo       = imageLoad(inputImage, ivec3(local+offs, 2));
 
-			float weight = exp(gaussFac*dot(sampleOffset, sampleOffset))-curveOffset;
 
 			vec3 normalOffset = normal_depth.xyz - normalCenter;
 			vec3 albedoOffset = albedo.rgb       - albedoCenter;

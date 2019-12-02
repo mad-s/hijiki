@@ -23,7 +23,7 @@ bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its) {
 	float b = 2 * dot(ray.direction, l);
 	float c = dot(l, l) - r*r;
 	float d = b*b-4*c;
-	if (d < M_EPS) {
+	if (d < 0) {
 		return false;
 	}
 	d = sqrt(d);

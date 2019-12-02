@@ -4,6 +4,8 @@ extern crate shaderc;
 
 extern crate rand;
 
+extern crate winit;
+
 mod glm;
 use glm::*;
 
@@ -177,7 +179,7 @@ struct ImageBlockGenerator {
 
 impl ImageBlockGenerator {
     fn new(width: u32, height: u32, block_size: u32, num_samples: u32) -> Self {
-        assert!(block_size & 64 == 0);
+        assert!(block_size & 63 == 0);
         Self {
             width,
             height,
@@ -224,14 +226,6 @@ impl Iterator for ImageBlockGenerator {
             sample_offset: vec2(rand::random::<f32>(), rand::random::<f32>()),
         })
     }
-    /*
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let num_x = (self.width  + self.block_size-1) / self.block_size;
-        let num_y = (self.height + self.block_size-1) / self.block_size;
-        let remaining = (self.num_samples * num_x * num_y - self.id) as usize;
-        (remaining, Some(remaining))
-    }
-    */
 }
 
 struct GPU {
@@ -249,7 +243,9 @@ impl GPU {
         })
         .unwrap();
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
-            extensions: wgpu::Extensions::default(),
+            extensions: wgpu::Extensions {
+                anisotropic_filtering: false,
+            },
             limits: wgpu::Limits::default(),
         });
 
@@ -402,7 +398,7 @@ impl IntegratorPipeline {
         let mut cpass = encoder.begin_compute_pass();
         cpass.set_pipeline(&self.pipeline);
         cpass.set_bind_group(0, &self.bind_group, &[]);
-        cpass.dispatch(block.dimension[0], block.dimension[1], 1);
+        cpass.dispatch((block.dimension[0]+15)/16, (block.dimension[1]+15)/16, 1);
         //println!("{:?}", block);
         drop(cpass);
     }
@@ -504,9 +500,150 @@ impl ReconstructionPipeline {
         let mut cpass = encoder.begin_compute_pass();
         cpass.set_pipeline(&self.pipeline);
         cpass.set_bind_group(0, &self.bind_group, &[]);
-        cpass.dispatch(block.dimension[0] + 2*self.radius, block.dimension[1] + 2*self.radius, 1);
+        cpass.dispatch(
+            block.dimension[0] + 2 * self.radius,
+            block.dimension[1] + 2 * self.radius,
+            1,
+        );
         //println!("{:?}", block);
         drop(cpass);
+    }
+}
+
+struct PreviewPipeline {
+    vertex_shader: wgpu::ShaderModule,
+    fragment_shader: wgpu::ShaderModule,
+    bind_group: wgpu::BindGroup,
+    pipeline: wgpu::RenderPipeline,
+    swap_chain: wgpu::SwapChain,
+    evt_loop: winit::EventsLoop,
+    window: winit::Window,
+    surface: wgpu::Surface,
+    width: u32,
+    height: u32,
+}
+
+impl PreviewPipeline {
+    fn new(gpu: &mut GPU, width: u32, height: u32, input: &wgpu::TextureView) -> Self {
+        let vertex_shader = gpu.load_shader_from_file("shader/fsquad.glsl", &[]);
+        let fragment_shader = gpu.load_shader_from_file("shader/preview.glsl", &[]);
+
+        std::env::set_var("WINIT_HIDPI_FACTOR", "1");
+        let evt_loop = winit::EventsLoop::new();
+        let window = winit::WindowBuilder::new()
+            .with_dimensions((800, 600).into())
+            .with_resizable(false)
+            .build(&evt_loop)
+            .unwrap();
+        let size = window.get_inner_size().unwrap().to_physical(window.get_hidpi_factor());
+        let surface = wgpu::Surface::create(&window);
+
+        let device = &mut gpu.device;
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            bindings: &[wgpu::BindGroupLayoutBinding {
+                binding: 0,
+                visibility: wgpu::ShaderStage::FRAGMENT,
+                ty: wgpu::BindingType::StorageTexture {
+                    dimension: wgpu::TextureViewDimension::D2,
+                },
+            }],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            bindings: &[wgpu::Binding {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(input),
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            bind_group_layouts: &[&bind_group_layout],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            layout: &pipeline_layout,
+            vertex_stage: wgpu::ProgrammableStageDescriptor {
+                module: &vertex_shader,
+                entry_point: "main",
+            },
+            fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
+                module: &fragment_shader,
+                entry_point: "main",
+            }),
+            rasterization_state: Some(wgpu::RasterizationStateDescriptor {
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: wgpu::CullMode::None,
+                depth_bias: 0,
+                depth_bias_slope_scale: 0.,
+                depth_bias_clamp: 0.,
+            }),
+            primitive_topology: wgpu::PrimitiveTopology::TriangleStrip,
+            color_states: &[wgpu::ColorStateDescriptor {
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                color_blend: wgpu::BlendDescriptor::REPLACE,
+                alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
+            depth_stencil_state: None,
+            index_format: wgpu::IndexFormat::Uint16,
+            vertex_buffers: &[],
+            sample_count: 1,
+            sample_mask: !0,
+            alpha_to_coverage_enabled: false,
+        });
+        let mut swap_chain = device.create_swap_chain(&surface, &wgpu::SwapChainDescriptor {
+            usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            width: size.width.round() as u32,
+            height: size.height.round() as u32,
+            present_mode: wgpu::PresentMode::Vsync,
+        });
+
+        PreviewPipeline {
+            vertex_shader,
+            fragment_shader,
+            bind_group,
+            pipeline,
+            swap_chain,
+            window,
+            surface,
+            evt_loop,
+            width,
+            height,
+        }
+    }
+
+    fn update(&mut self, encoder: &mut wgpu::CommandEncoder) -> (bool,Option<wgpu::SwapChainOutput>) {
+        let mut close = false;
+        let mut refresh = false;
+        self.evt_loop.poll_events(|event| {
+            if let winit::Event::WindowEvent{event: winit::WindowEvent::CloseRequested, ..} = event {
+                close = true;
+            }
+            if let winit::Event::WindowEvent{event: winit::WindowEvent::Refresh, ..} = event {
+                refresh = true;
+            }
+        });
+
+        let mut frame_keepalive = None;
+        if true {
+            let frame = self.swap_chain.get_next_texture();
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
+                    attachment: &frame.view,
+                    resolve_target: None,
+                    load_op: wgpu::LoadOp::Clear,
+                    store_op: wgpu::StoreOp::Store,
+                    clear_color: wgpu::Color {r: 1., g: 0., b: 1., a: 1.},
+                }],
+                depth_stencil_attachment: None,
+            });
+            rpass.set_pipeline(&self.pipeline);
+            rpass.set_bind_group(0, &self.bind_group, &[]);
+            rpass.draw(0..4, 0..1);
+            drop(rpass);
+            frame_keepalive = Some(frame);
+        }
+
+        (close, frame_keepalive)
     }
 }
 
@@ -528,6 +665,7 @@ struct Renderer {
 
     integrator_pipeline: IntegratorPipeline,
     reconstruction_pipeline: ReconstructionPipeline,
+    preview_pipeline: PreviewPipeline,
 }
 
 impl Renderer {
@@ -646,9 +784,10 @@ impl Renderer {
             &current_block,
             &intermediate_texture.create_default_view(),
             &final_texture.create_default_view(),
-            5,  // radius
-            1., // stddev
+            2,   // radius
+            0.5, // stddev
         );
+        let preview_pipeline = PreviewPipeline::new(&mut gpu, width, height, &final_texture.create_default_view());
 
         Renderer {
             gpu,
@@ -671,6 +810,7 @@ impl Renderer {
 
             integrator_pipeline,
             reconstruction_pipeline,
+            preview_pipeline,
         }
     }
 
@@ -679,7 +819,7 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             encoder.copy_buffer_to_buffer(
                 &self.all_blocks,
                 (block.id as usize * std::mem::size_of::<ImageBlock>()) as wgpu::BufferAddress,
@@ -689,14 +829,21 @@ impl Renderer {
             );
             self.integrator_pipeline.run(&block, &mut encoder);
             self.reconstruction_pipeline.run(&block, &mut encoder);
-            if block.id % 1 == 0 {
-                let next_encoder = self
-                    .gpu
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
-                self.gpu
-                    .queue
-                    .submit(&[std::mem::replace(&mut encoder, next_encoder).finish()]);
+
+            self.preview_pipeline.window.set_title(&format!("{:3.3}% {}/{}", 100. * block.id as f32 / self.blocks.len() as f32, block.id, self.blocks.len()));
+            let (closed, frame_keepalive) = self.preview_pipeline.update(&mut encoder);
+
+            let next_encoder = self
+                .gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
+            self.gpu
+                .queue
+                .submit(&[std::mem::replace(&mut encoder, next_encoder).finish()]);
+
+            drop(frame_keepalive);
+            if (closed) {
+                break;
             }
         }
         self.gpu.queue.submit(&[encoder.finish()]);
@@ -746,7 +893,6 @@ impl Renderer {
                         .flat_map(|row| &row[..width as usize])
                         .map(|&[r, g, b, n]| [r / n, g / n, b / n])
                         .collect::<Vec<[f32; 3]>>();
-                    //println!("{:?}", &pixels);
 
                     use openexr::frame_buffer::FrameBuffer;
                     use openexr::header::Header;
@@ -773,6 +919,16 @@ impl Renderer {
 }
 
 fn main() {
+    /*
+    let mut gpu = GPU::new();
+    let mut preview = PreviewPipeline::new(&mut gpu, 800, 600);
+    loop {
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {todo: 0});
+        let (closed, frame_keepalive) = preview.update(&mut encoder);
+        gpu.queue.submit(&[encoder.finish()]);
+        drop(frame_keepalive);
+    }
+    */
     let scene = Scene {
         // cornell box
         camera: Camera {
@@ -873,7 +1029,7 @@ fn main() {
         portals: vec![],
     };
 
-    let block_generator = ImageBlockGenerator::new(800, 600, 128, 32);
+    let block_generator = ImageBlockGenerator::new(800, 600, 128, 65536);
     let mut renderer = Renderer::new(scene, block_generator);
     renderer.render();
     renderer.save_image("/tmp/output.exr");

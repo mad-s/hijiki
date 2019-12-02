@@ -1,3 +1,3 @@
 #define M_PI 3.1415926535897932384626433832795
-#define M_EPS 1e-5
+#define M_EPS 1e-4
 
