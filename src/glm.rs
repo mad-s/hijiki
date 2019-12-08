@@ -24,7 +24,7 @@ pub struct Vec4 {
 
 use std::ops::{Index,IndexMut};
 macro_rules! index_impl {
-    ($t:ty: $($ix:expr => $fname:ident),*) => {
+    ($t:ty: $($ix:expr => $fname:ident),*; $len:expr) => {
         impl Index<usize> for $t {
             type Output = f32;
             fn index(&self, ix: usize) -> &f32 {
@@ -46,12 +46,22 @@ macro_rules! index_impl {
                 }
             }
         }
+
+        impl $t {
+            pub fn from_array(data: [f32; $len]) -> Self {
+                Self {
+                    $(
+                        $fname: data[$ix]
+                    ),*
+                }
+            }
+        }
     }
 }
 
-index_impl!(Vec2: 0 => x, 1 => y);
-index_impl!(Vec3: 0 => x, 1 => y, 2 => z);
-index_impl!(Vec4: 0 => x, 1 => y, 2 => z, 3 => w);
+index_impl!(Vec2: 0 => x, 1 => y; 2);
+index_impl!(Vec3: 0 => x, 1 => y, 2 => z; 3);
+index_impl!(Vec4: 0 => x, 1 => y, 2 => z, 3 => w; 4);
 
 use std::ops::{Add,Sub,Mul,Div};
 use std::cmp::{PartialOrd,Ordering,Ordering::*};

@@ -88,6 +88,8 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		if (!intersectScene(ray, its)) {
 			return;
 		}
+		//total = vec3(its.objectID);
+		//return;
 		if (bounce == 0) {
 			depth  = its.t;
 			normal = its.n;
@@ -106,7 +108,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 			
 			{
 				ShapeQueryRecord sRec;
-				sampleQuad(quads[0], sRec);
+				sampleQuad(quads[2], sRec);
 
 
 				vec3 toLight = sRec.p - its.p;

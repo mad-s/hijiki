@@ -6,6 +6,8 @@ extern crate rand;
 
 extern crate winit;
 
+extern crate tobj;
+
 mod glm;
 use glm::*;
 
@@ -50,6 +52,7 @@ struct Camera {
     fov: f32,
 }
 
+#[derive(Debug)]
 struct Scene {
     camera: Camera,
 
@@ -83,6 +86,115 @@ struct SceneBufferInfo {
 const BUFFER_ALIGNMENT: usize = 256;
 
 impl Scene {
+    fn from_obj<P: AsRef<std::path::Path>>(file: P) -> Self {
+        let (models, materials) = tobj::load_obj(file.as_ref()).unwrap();
+
+        enum MaterialType {
+            Diffuse,
+            Mirror,
+            Dielectric,
+            Emissive,
+            Portal
+        };
+
+        let mut scene = Scene {
+            camera: Camera {
+                position: vec4(0., 0.91, 5.41, 0.0),
+                rotation: vec4(0., 0., 0., 1.),
+                fov: 27.7,
+            },
+            spheres: vec![],
+            planes: vec![],
+            quads: vec![],
+            materials: vec![],
+
+            diffuse: vec![],
+            mirrors: vec![],
+            dielectric: vec![],
+            emitters: vec![],
+            portals: vec![],
+        };
+        let mut material_indices = Vec::<(MaterialType,usize)>::new();
+
+        for material in materials.iter() {
+            if material.name.starts_with("light") {
+                let power : Vec<f32> = material.unknown_param.get("Ke").unwrap().split(' ').map(|s| s.parse().unwrap()).collect();
+                material_indices.push((MaterialType::Emissive, scene.emitters.len()));
+                scene.emitters.push(EmitterMaterial {
+                    power: vec3(power[0], power[1], power[2]),
+                });
+            } else {
+                material_indices.push((MaterialType::Diffuse, scene.diffuse.len()));
+                scene.diffuse.push(DiffuseMaterial {
+                    color: Vec3::from_array(material.diffuse),
+                })
+            }
+        }
+
+        for model in models.iter() {
+            let mesh = &model.mesh;
+
+            let material = match mesh.material_id {
+                Some(x) => x,
+                _ => continue,
+            };
+            let material = &material_indices[material];
+            let material = match material.0 {
+                MaterialType::Diffuse => material.1,
+                MaterialType::Mirror => scene.diffuse.len() + material.1,
+                MaterialType::Dielectric => scene.diffuse.len() + scene.mirrors.len() + material.1,
+                MaterialType::Emissive => scene.diffuse.len() + scene.mirrors.len() + scene.dielectric.len() + material.1,
+                _ => panic!(),
+            };
+
+            let mut last = [0,0,0];
+            for tri in mesh.indices.chunks(3) {
+                let tri = [tri[0], tri[1], tri[2]];
+
+                if tri[0] == last[0] && tri[1] == last[2] { // recover triangulated quads
+                    let a = last[0] as usize;
+                    let b = last[1] as usize;
+                    let c = last[2] as usize;
+                    let d = tri[2] as usize;
+
+                    let get_vertex_pos = |ix| {
+                        vec3(
+                            mesh.positions[3*ix],
+                            mesh.positions[3*ix+1],
+                            mesh.positions[3*ix+2],
+                        )
+                    };
+
+                    let a = get_vertex_pos(a);
+                    let b = get_vertex_pos(b);
+                    let c = get_vertex_pos(c);
+                    let d = get_vertex_pos(d);
+
+
+                    let origin = a;
+                    let edge1 = b-a;
+                    let edge2 = d-a;
+
+                    let error = (c-(origin+edge1+edge2)).length();
+                    if error < 0.01 {
+                        // we have a quad!
+                        scene.quads.push(Quad {
+                            origin,
+                            edge1,
+                            edge2
+                        });
+                        scene.materials.push(material as u32);
+                    }
+                }
+
+                last = tri;
+            }
+        }
+
+        scene
+
+    }
+
     fn subbuffer_sizes(&self) -> Vec<usize> {
         assert_eq!(
             self.spheres.len() + self.planes.len() + self.quads.len(),
@@ -175,6 +287,7 @@ struct ImageBlockGenerator {
     x: u32,
     y: u32,
     remaining_samples: u32,
+    sample_offset: [f32; 2],
 }
 
 impl ImageBlockGenerator {
@@ -189,6 +302,7 @@ impl ImageBlockGenerator {
             x: 0,
             y: 0,
             remaining_samples: num_samples,
+            sample_offset: rand::random(),
         }
     }
 }
@@ -215,6 +329,7 @@ impl Iterator for ImageBlockGenerator {
             if self.y >= self.height {
                 self.y = 0;
                 self.remaining_samples -= 1;
+                self.sample_offset = rand::random();
             }
         }
         Some(ImageBlock {
@@ -223,7 +338,7 @@ impl Iterator for ImageBlockGenerator {
             origin: [x, y],
             dimension: [w, h],
             original_dimension: [self.width, self.height],
-            sample_offset: vec2(rand::random::<f32>(), rand::random::<f32>()),
+            sample_offset: Vec2::from_array(self.sample_offset),
         })
     }
 }
@@ -929,6 +1044,7 @@ fn main() {
         drop(frame_keepalive);
     }
     */
+    /*
     let scene = Scene {
         // cornell box
         camera: Camera {
@@ -952,6 +1068,7 @@ fn main() {
             },*/
         ],
         planes: vec![
+            /*
             Plane {
                 normal_offset: vec4(
                     // right wall pointing to the left
@@ -976,6 +1093,7 @@ fn main() {
                     0., 1.0, 0., 0.,
                 ),
             },
+            */
             Plane {
                 normal_offset: vec4(
                     // back
@@ -983,21 +1101,27 @@ fn main() {
                 ),
             },
         ],
-        quads: vec![Quad {
-            origin: vec3(-0.24, 1.58, -0.22),
-            edge1: vec3(0.24 + 0.23, 0., 0.),
-            edge2: vec3(0., 0., 0.22 + 0.16),
-        }],
+        quads: vec![
+            Quad { // light
+                origin: vec3(-0.24, 1.58, -0.22),
+                edge1: vec3(0.24 + 0.23, 0., 0.),
+                edge2: vec3(0., 0., 0.22 + 0.16),
+            },
+            Quad { // ceiling
+                origin: vec3(-1.,1.59,1.),
+                edge1: vec3(0.,0.,-2.),
+                edge2: vec3(2., 0., 0.),
+            },
+        ],
         materials: vec![
             3, // mirror sphere
             4, // glass sphere,
-            //5, // emissive sphere
-            2, // right wall
-            1, // left wall,
+            0, // back
             0, // ceiling
             0, // floor
-            0, // back
             5, // emissive quad
+            //2, // right wall
+            //1, // left wall,
         ],
 
         diffuse: vec![
@@ -1028,8 +1152,10 @@ fn main() {
         ],
         portals: vec![],
     };
+    */
 
-    let block_generator = ImageBlockGenerator::new(800, 600, 128, 65536);
+    let scene = Scene::from_obj("scenes/cbox.obj");
+    let block_generator = ImageBlockGenerator::new(800, 600, 128, 128);
     let mut renderer = Renderer::new(scene, block_generator);
     renderer.render();
     renderer.save_image("/tmp/output.exr");
