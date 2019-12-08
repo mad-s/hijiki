@@ -79,7 +79,6 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 	depth = 0;
 	normal = vec3(0);
         vec3 currentExtinction = vec3(0.);
-        vec3 dielectricEntryPoint = vec3(0.);
         bool isInsideDielectric = false;
 
 	vec3 throughput = vec3(1.);
@@ -101,7 +100,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 
                 if (isInsideDielectric) {
                         // apply beer's law
-                        float dist = length(its.p - dielectricEntryPoint);
+                        float dist = length(its.p - ray.origin);
                         throughput *= exp(-currentExtinction * dist);
                 }
 
@@ -171,11 +170,6 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 						// reflect
 						ray.direction = reflect(ray.direction, normal);
 					} else {
-                                                isInsideDielectric = !isInsideDielectric; // TODO: Handle dielectric-dielectric interfaces, e.g. water->glass
-                                                if (isInsideDielectric) {
-                                                        dielectricEntryPoint = its.p;
-                                                        currentExtinction = dielectricMaterials[mat].extinction;
-                                                }
 						float cosThetaO = sqrt(k);
 
 						float rho_par  = (eta*cosThetaI-cosThetaO)/(eta*cosThetaI+cosThetaO);
@@ -185,12 +179,16 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 						if (randUniformFloat() < f_r) {
 							ray.direction = reflect(ray.direction, normal);
 						} else {
+                                                        isInsideDielectric = !isInsideDielectric; // TODO: Handle dielectric-dielectric interfaces, e.g. water->glass
 							vec3 parallel = ray.direction - dot(ray.direction, normal) * normal;
 							// refract
 							ray.direction = etaInv * parallel - sqrt(k) * normal;
 						}
 						
 					}
+                                        if (isInsideDielectric) {
+                                                currentExtinction = dielectricMaterials[mat].extinction;
+                                        }
 				} else {
 					mat -= numDielectric;
 					if (mat < numEmitters) {
