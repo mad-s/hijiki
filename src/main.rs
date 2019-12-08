@@ -97,20 +97,40 @@ impl Scene {
             Portal
         };
 
+        let angle = -1.5f32.to_radians(); // look down a bit
+        let rotation = vec4((0.5*angle).sin(), 0., 0., (0.5*angle).cos());
+
         let mut scene = Scene {
             camera: Camera {
                 position: vec4(0., 0.91, 5.41, 0.0),
-                rotation: vec4(0., 0., 0., 1.),
+                rotation,
                 fov: 27.7,
             },
-            spheres: vec![],
+            spheres: vec![
+                Sphere {
+                    // mirror sphere
+                    position_radius: vec4(-0.421400, 0.332100, -0.280000, 0.3263),
+                },
+                Sphere {
+                    // glass sphere
+                    position_radius: vec4(0.445800, 0.332100, 0.376700, 0.3263),
+                },
+            ],
             planes: vec![],
             quads: vec![],
-            materials: vec![],
+            materials: vec![5,6],
 
             diffuse: vec![],
-            mirrors: vec![],
-            dielectric: vec![],
+            mirrors: vec![
+                MirrorMaterial {
+                    dummy: 0,
+                }
+            ],
+            dielectric: vec![
+                DielectricMaterial {
+                    eta_ratio: 1.5,
+                }
+            ],
             emitters: vec![],
             portals: vec![],
         };
@@ -190,6 +210,7 @@ impl Scene {
                 last = tri;
             }
         }
+
 
         scene
 
@@ -615,9 +636,10 @@ impl ReconstructionPipeline {
         let mut cpass = encoder.begin_compute_pass();
         cpass.set_pipeline(&self.pipeline);
         cpass.set_bind_group(0, &self.bind_group, &[]);
+        //cpass.dispatch((block.dimension[0]+15)/16, (block.dimension[1]+15)/16, 1);
         cpass.dispatch(
-            block.dimension[0] + 2 * self.radius,
-            block.dimension[1] + 2 * self.radius,
+            (block.dimension[0] + 2*self.radius+15)/16,
+            (block.dimension[1] + 2*self.radius+15)/16,
             1,
         );
         //println!("{:?}", block);
@@ -945,9 +967,15 @@ impl Renderer {
             self.integrator_pipeline.run(&block, &mut encoder);
             self.reconstruction_pipeline.run(&block, &mut encoder);
 
-            self.preview_pipeline.window.set_title(&format!("{:3.3}% {}/{}", 100. * block.id as f32 / self.blocks.len() as f32, block.id, self.blocks.len()));
-            let (closed, frame_keepalive) = self.preview_pipeline.update(&mut encoder);
+            let mut frame_keepalive = None;
+            let mut closed = false;
 
+            if block.id % 128 == 0 {
+                self.preview_pipeline.window.set_title(&format!("{:3.3}% {}/{}", 100. * block.id as f32 / self.blocks.len() as f32, block.id, self.blocks.len()));
+                let (a, b) = self.preview_pipeline.update(&mut encoder);
+                closed = a;
+                frame_keepalive = Some(b);
+            }
             let next_encoder = self
                 .gpu
                 .device
@@ -957,7 +985,7 @@ impl Renderer {
                 .submit(&[std::mem::replace(&mut encoder, next_encoder).finish()]);
 
             drop(frame_keepalive);
-            if (closed) {
+            if closed {
                 break;
             }
         }
@@ -1155,7 +1183,8 @@ fn main() {
     */
 
     let scene = Scene::from_obj("scenes/cbox.obj");
-    let block_generator = ImageBlockGenerator::new(800, 600, 128, 128);
+    dbg!(&scene);
+    let block_generator = ImageBlockGenerator::new(800, 600, 128, 512);
     let mut renderer = Renderer::new(scene, block_generator);
     renderer.render();
     renderer.save_image("/tmp/output.exr");

@@ -1,25 +1,25 @@
 #[repr(C, align(8))]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Vec2 {
-    x: f32,
-    y: f32,
+    pub x: f32,
+    pub y: f32,
 }
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Vec3 {
-    x: f32,
-    y: f32,
-    z: f32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
 }
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Vec4 {
-    x: f32,
-    y: f32,
-    z: f32,
-    w: f32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
 }
 
 use std::ops::{Index,IndexMut};
@@ -162,10 +162,13 @@ arith_impl!(Vec3, x, y, z);
 arith_impl!(Vec4, x, y, z, w);
 
 
-pub trait VectorSpace: Copy {
+pub trait VectorSpace: Add + Mul<f32, Output=Self> + Div<f32, Output=Self> + Copy {
     fn dot(self, other: Self) -> f32;
     fn length(self) -> f32 {
         self.dot(self).sqrt()
+    }
+    fn normalized(self) -> Self {
+        self / self.length()
     }
 }
 

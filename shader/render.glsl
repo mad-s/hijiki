@@ -25,11 +25,11 @@ struct Ray {
 
 Ray getCameraRayAt(Camera c, vec2 x, vec2 dimension) {
 	x = x - 0.5 * dimension;
-	x = x * tan(radians(0.5*c.fov)) / (0.5*dimension.y);
+	x = x * tan(radians(0.5*c.fov)) / (0.5*dimension.x);
 
 	Ray res;
 	res.origin = c.position.xyz;
-	res.direction = normalize(vec3(x.x, -x.y, -1.0)); // TODO: camera rotation
+	res.direction = normalize(quaternionRotate(vec3(x.x, -x.y, -1.0), c.rotation));
 	res.tMin = M_EPS;
 	res.tMax = 1e100;
 	return res;

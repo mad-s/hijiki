@@ -1,7 +1,7 @@
 #version 450
 #pragma shader_stage(compute)
 
-//layout(local_size_x=16,local_size_y=16) in;
+layout(local_size_x=16,local_size_y=16) in;
 
 #include "math.glsl"
 #include "block.glsl"
@@ -24,6 +24,7 @@ void main() {
 	//uvec2 local = gl_GlobalInvocationID.xy;
 	uvec2 global = local + currentImageBlock.origin;
 	vec4 outputValue = imageLoad(outputImage, ivec2(global));
+
 	// TODO: optimize loop indices
 	float gaussFac = -1. / (2*RECONSTRUCTION_STDDEV*RECONSTRUCTION_STDDEV);
 	float curveOffset = exp(gaussFac * RECONSTRUCTION_RADIUS*RECONSTRUCTION_RADIUS);
@@ -32,11 +33,11 @@ void main() {
 	vec3 albedoCenter = imageLoad(inputImage, ivec3(local, 2)).rgb;
 
 	for (int dx = -RECONSTRUCTION_RADIUS; dx <= RECONSTRUCTION_RADIUS; dx++) {
-		if (local.x + dx < 0 || local.x + dx >= currentImageBlock.dimension.x)
-			continue;
+		//if (local.x + dx < 0 || local.x + dx >= currentImageBlock.dimension.x)
+		//	continue;
 		for (int dy = -RECONSTRUCTION_RADIUS; dy <= RECONSTRUCTION_RADIUS; dy++) {
-			if (local.y + dy < 0 || local.y + dy >= currentImageBlock.dimension.y)
-				continue;
+			//if (local.y + dy < 0 || local.y + dy >= currentImageBlock.dimension.y)
+			//	continue;
 			ivec2 offs = ivec2(dx, dy);
 
 			vec2 sampleOffset = offs + currentImageBlock.sampleOffset - 0.5;
@@ -54,5 +55,8 @@ void main() {
 			outputValue += weight * color_weight;
 		}
 	}
+
+	//vec4 color_weight = imageLoad(inputImage, ivec3(local, 0));
+	//outputValue += color_weight;
 	imageStore(outputImage, ivec2(global), outputValue);
 }
