@@ -30,6 +30,7 @@ struct MirrorMaterial {
 #[derive(Debug, Clone, Copy)]
 struct DielectricMaterial {
     eta_ratio: f32,
+    extinction: Vec3,
 }
 
 #[repr(C, align(16))]
@@ -1044,7 +1045,7 @@ fn main() {
         drop(frame_keepalive);
     }
     */
-    /*
+    
     let scene = Scene {
         // cornell box
         camera: Camera {
@@ -1068,7 +1069,7 @@ fn main() {
             },*/
         ],
         planes: vec![
-            /*
+            
             Plane {
                 normal_offset: vec4(
                     // right wall pointing to the left
@@ -1093,7 +1094,7 @@ fn main() {
                     0., 1.0, 0., 0.,
                 ),
             },
-            */
+
             Plane {
                 normal_offset: vec4(
                     // back
@@ -1107,21 +1108,21 @@ fn main() {
                 edge1: vec3(0.24 + 0.23, 0., 0.),
                 edge2: vec3(0., 0., 0.22 + 0.16),
             },
-            Quad { // ceiling
+            /*Quad { // ceiling
                 origin: vec3(-1.,1.59,1.),
                 edge1: vec3(0.,0.,-2.),
                 edge2: vec3(2., 0., 0.),
-            },
+            },*/
         ],
         materials: vec![
             3, // mirror sphere
             4, // glass sphere,
-            0, // back
+            2, // right wall
+            1, // left wall,
             0, // ceiling
             0, // floor
+            0, // back
             5, // emissive quad
-            //2, // right wall
-            //1, // left wall,
         ],
 
         diffuse: vec![
@@ -1141,6 +1142,7 @@ fn main() {
         dielectric: vec![DielectricMaterial {
             // material 4: glass
             eta_ratio: 1.5046,
+            extinction: vec3(1., 1., 0.),
         }],
         emitters: vec![
             EmitterMaterial {
@@ -1152,9 +1154,9 @@ fn main() {
         ],
         portals: vec![],
     };
-    */
 
-    let scene = Scene::from_obj("scenes/cbox.obj");
+
+    //let scene = Scene::from_obj("scenes/cbox.obj");
     let block_generator = ImageBlockGenerator::new(800, 600, 128, 128);
     let mut renderer = Renderer::new(scene, block_generator);
     renderer.render();

@@ -66,7 +66,6 @@ struct ShapeQueryRecord {
 
 #include "block.glsl"
 
-
 layout(set = 0, binding = 0) buffer CurrentImageBlock {
 	ImageBlock currentImageBlock;
 };
@@ -79,6 +78,9 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 	albedo = vec3(0.);
 	depth = 0;
 	normal = vec3(0);
+        vec3 currentExtinction = vec3(0.);
+        vec3 dielectricEntryPoint = vec3(0.);
+        bool isInsideDielectric = false;
 
 	vec3 throughput = vec3(1.);
 	bool wasDiscrete = true;
@@ -97,6 +99,12 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 
 		uint mat = materials[its.objectID];
 
+                if (isInsideDielectric) {
+                        // apply beer's law
+                        float dist = length(its.p - dielectricEntryPoint);
+                        throughput *= exp(-currentExtinction * dist);
+                }
+
 		bool wasPortal = false;
 		if (mat < numDiffuse) {
 			if (!hasAlbedo) {
@@ -109,7 +117,6 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 			{
 				ShapeQueryRecord sRec;
 				sampleQuad(quads[2], sRec);
-
 
 				vec3 toLight = sRec.p - its.p;
 				float r = length(toLight);
@@ -150,6 +157,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 					float etaInv = 1. / eta;
 					float cosThetaI = -dot(its.n, ray.direction);
 					vec3 normal = its.n;
+                                        isInsideDielectric = cosThetaI > 0;
 					if (cosThetaI < 0) {
 						eta = etaInv;
 						etaInv = 1. / eta;
@@ -163,6 +171,11 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 						// reflect
 						ray.direction = reflect(ray.direction, normal);
 					} else {
+                                                isInsideDielectric = !isInsideDielectric; // TODO: Handle dielectric-dielectric interfaces, e.g. water->glass
+                                                if (isInsideDielectric) {
+                                                        dielectricEntryPoint = its.p;
+                                                        currentExtinction = dielectricMaterials[mat].extinction;
+                                                }
 						float cosThetaO = sqrt(k);
 
 						float rho_par  = (eta*cosThetaI-cosThetaO)/(eta*cosThetaI+cosThetaO);
