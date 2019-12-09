@@ -8,6 +8,12 @@ extern crate winit;
 
 extern crate tobj;
 
+extern crate bvh;
+use bvh::aabb::Bounded;
+use bvh::aabb::AABB;
+use bvh::nalgebra::Vector3;
+use bvh::nalgebra::Point3;
+
 use std::borrow::Borrow;
 
 extern crate strum;
@@ -41,7 +47,38 @@ const MATERIAL_TAG_SHIFT : u32 = 24; // top 8 bits are tag
 enum Shape {
     Sphere(Sphere),
     Quad(Quad),
-    Plane(Plane),
+}
+
+
+struct BVHShape {
+    shape: Shape,
+    node_index: usize,
+}
+
+impl bvh::aabb::Bounded for BVHShape {
+    fn aabb(&self) -> AABB {
+        match self.shape {
+            Shape::Sphere(sphere) => sphere.aabb(),
+            Shape::Quad(quad)     => quad.aabb(),
+        }
+    }
+}
+impl bvh::bounding_hierarchy::BHShape for BVHShape {
+    fn set_bh_node_index(&mut self, index: usize) {
+        self.node_index = index;
+    }
+    fn bh_node_index(&self) -> usize {
+        self.node_index
+    }
+}
+
+#[repr(C,align(16))]
+#[derive(Debug,Clone,Copy)]
+struct CompiledBVHNode {
+    aabb_min: Point3<f32>,
+    shape_index: u32,
+    aabb_max: Point3<f32>,
+    exit_index: u32,
 }
 
 
@@ -109,16 +146,71 @@ struct Scene {
 impl Scene {
     fn compile(self) -> CompiledScene {
         let mut spheres = vec![];
-        let mut planes  = vec![];
         let mut quads   = vec![];
+        let mut bvh_shapes = vec![];
+        let mut shape_indices = vec![];
 
         for (shape, material) in self.objects.into_iter() {
             match shape {
-                Shape::Sphere(sphere) => spheres.push((sphere, material)),
-                Shape::Plane(plane)   => planes. push((plane,  material)),
-                Shape::Quad(quad)     => quads.  push((quad,   material)),
+                Shape::Sphere(sphere) => {
+                    shape_indices.push(spheres.len());
+                    spheres.push((sphere, material))
+                },
+                Shape::Quad(quad)     => {
+                    shape_indices.push(quads.len());
+                    quads.push((quad,   material))
+                },
+            }
+            bvh_shapes.push(BVHShape{shape, node_index: 0});
+        }
+
+        let bvh = bvh::bvh::BVH::build(&mut bvh_shapes[..]);
+        bvh.pretty_print();
+
+        let mut indices = vec![usize::max_value(); bvh.nodes.len()];
+        fn calculate_indices(current: usize, nodes: &[bvh::bvh::BVHNode], indices: &mut [usize], current_index: &mut usize) {
+            let node = nodes[current];
+            indices[current] = *current_index;
+            *current_index += 1;
+            if node.shape_index().is_none() {
+                calculate_indices(node.child_l(), nodes, indices, current_index);
+                calculate_indices(node.child_r(), nodes, indices, current_index);
             }
         }
+        calculate_indices(0, &bvh.nodes, &mut indices, &mut 0);
+        println!("{:?}", indices);
+        fn flatten_bvh(current: usize, aabb: AABB, skip_index: usize, nodes: &[bvh::bvh::BVHNode], flat: &mut Vec<CompiledBVHNode>, indices: &[usize]) {
+            let node = nodes[current];
+            let shape = node.shape_index();
+            println!("{:?} => {:?}", current, flat.len());
+            flat.push(CompiledBVHNode {
+                aabb_min: aabb.min,
+                shape_index: shape.map(|x| x as u32).unwrap_or(u32::max_value()),
+                aabb_max: aabb.max,
+                exit_index: skip_index as u32,
+            });
+            if shape.is_none() { // interior node, descend to children
+                flatten_bvh(node.child_l(), node.child_l_aabb(), indices[node.child_r()], nodes, flat, indices);
+                flatten_bvh(node.child_r(), node.child_r_aabb(), skip_index,              nodes, flat, indices);
+            }
+        };
+
+        let mut flat = vec![];
+        let root_aabb = bvh.nodes[0].child_l_aabb().join(&bvh.nodes[0].child_r_aabb());
+        flatten_bvh(0, root_aabb, 1000000, &bvh.nodes, &mut flat, &indices[..]);
+        // transform shape indices
+        for node in &mut flat[..] {
+            if node.shape_index == u32::max_value() {
+                continue;
+            }
+            let offset = match bvh_shapes[node.shape_index as usize].shape {
+                Shape::Sphere(_) => 0,
+                Shape::Quad(_) => spheres.len(),
+            };
+            node.shape_index = (shape_indices[node.shape_index as usize] + offset) as u32;
+        }
+        let bvh = flat;
+        println!("{:#?}", bvh);
 
         let mut diffuse    = vec![];
         let mut dielectric = vec![];
@@ -151,23 +243,19 @@ impl Scene {
         for &(_, mat) in &spheres {
             materials.push(material_reprs[mat]);
         }
-        for &(_, mat) in &planes {
-            materials.push(material_reprs[mat]);
-        }
         for &(_, mat) in &quads {
             materials.push(material_reprs[mat]);
         }
 
         let spheres = spheres.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
-        let planes  =  planes.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
         let quads   =   quads.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
 
 
         CompiledScene {
             camera: self.camera,
             spheres,
-            planes,
             quads,
+            bvh,
             materials,
             diffuse,
             dielectric,
@@ -180,17 +268,16 @@ impl Scene {
 struct CompiledScene {
     camera: Camera,
 
+    bvh: Vec<CompiledBVHNode>,
+
     spheres: Vec<Sphere>,
-    planes: Vec<Plane>,
     quads: Vec<Quad>,
 
     materials: Vec<u32>,
 
     diffuse: Vec<DiffuseMaterial>,
-    //mirrors: Vec<MirrorMaterial>,
     dielectric: Vec<DielectricMaterial>,
     emitters: Vec<EmitterMaterial>,
-    //portals: Vec<PortalMaterial>,
 }
 
 
@@ -199,16 +286,7 @@ struct CompiledScene {
 struct SceneBufferInfo {
     camera: Camera,
     num_spheres: u32,
-    num_planes: u32,
     num_quads: u32,
-
-    /*
-    num_diffuse: u32,
-    num_mirrors: u32,
-    num_dielectric: u32,
-    num_emitters: u32,
-    num_portals: u32,
-    */
 }
 
 
@@ -263,7 +341,7 @@ impl Scene {
                     let d = tri[2] as usize;
 
                     let get_vertex_pos = |ix| {
-                        vec3(
+                        Point3::new(
                             mesh.positions[3*ix],
                             mesh.positions[3*ix+1],
                             mesh.positions[3*ix+2],
@@ -280,14 +358,14 @@ impl Scene {
                     let edge1 = b-a;
                     let edge2 = d-a;
 
-                    let error = (c-(origin+edge1+edge2)).length();
+                    let error = (c-(origin+edge1+edge2)).norm();
                     if error < 0.01 {
                         // we have a quad!
-                        scene.objects.push((Shape::Quad(Quad{
+                        scene.objects.push((Shape::Quad(Quad::new(
                             origin,
                             edge1,
-                            edge2
-                        }), material));
+                            edge2,
+                        )), material));
                     }
                 }
 
@@ -304,15 +382,16 @@ impl CompiledScene {
 
     fn subbuffer_sizes(&self) -> Vec<usize> {
         assert_eq!(
-            self.spheres.len() + self.planes.len() + self.quads.len(),
+            self.spheres.len() + self.quads.len(),
             self.materials.len()
         );
         vec![
             std::mem::size_of::<SceneBufferInfo>(),
+            self.bvh.len() * std::mem::size_of::<CompiledBVHNode>(),
             self.spheres.len() * std::mem::size_of::<Sphere>(),
-            self.planes.len() * std::mem::size_of::<Plane>(),
             self.quads.len() * std::mem::size_of::<Quad>(),
-            self.materials.len() * std::mem::size_of::<u32>(), // align to 16 bytes
+
+            self.materials.len() * std::mem::size_of::<u32>(),
             self.diffuse.len() * std::mem::size_of::<DiffuseMaterial>(),
             //self.mirrors.len() * std::mem::size_of::<MirrorMaterial>(),
             self.dielectric.len() * std::mem::size_of::<DielectricMaterial>(),
@@ -326,14 +405,13 @@ impl CompiledScene {
 
     fn write_to_buffer(&self, mut buffer: &mut [u8]) {
         assert_eq!(
-            self.spheres.len() + self.planes.len() + self.quads.len(),
+            self.spheres.len() + self.quads.len(),
             self.materials.len()
         );
 
         let info = SceneBufferInfo {
             camera: self.camera,
             num_spheres: self.spheres.len() as u32,
-            num_planes: self.planes.len() as u32,
             num_quads: self.quads.len() as u32,
         };
 
@@ -352,8 +430,8 @@ impl CompiledScene {
         }
         unsafe {
             put(&mut buffer, std::slice::from_ref(&info));
+            put(&mut buffer, &self.bvh[..]);
             put(&mut buffer, &self.spheres[..]);
-            put(&mut buffer, &self.planes[..]);
             put(&mut buffer, &self.quads[..]);
             put(&mut buffer, &self.materials[..]);
 
@@ -1185,11 +1263,13 @@ fn main() {
         scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(1., 1., 0.), 1.5)));
         scene.objects.push((Shape::Sphere(Sphere {
                     // mirror sphere
-                    position_radius: vec4(-0.421400, 0.332100, -0.280000, 0.3263),
+                    position: Point3::new(-0.421400, 0.332100, -0.280000),
+                    radius: 0.3263,
                 }), scene.materials.len()-2));
         scene.objects.push((Shape::Sphere(Sphere {
                     // glass sphere
-                    position_radius: vec4(0.445800, 0.332100, 0.376700, 0.3263),
+                    position: Point3::new(0.445800, 0.332100, 0.376700),
+                    radius: 0.3263,
                 }), scene.materials.len()-1));
     }
 

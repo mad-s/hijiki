@@ -10,12 +10,6 @@ layout(set = 0, binding = 9) buffer EmissiveMaterials {
 	 EmissiveMaterial emissiveMaterials[];
 };
 
-/*
-layout(set = 0, binding = 10) buffer PortalMaterials {
-	 PortalMaterial portalMaterials[];
-};
-*/
-
 
 vec3 evalBSDF(uint material, vec3 wi, vec3 n, vec3 wo) {
 	uint tag = material >> MATERIAL_TAG_SHIFT;
