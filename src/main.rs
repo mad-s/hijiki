@@ -8,11 +8,42 @@ extern crate winit;
 
 extern crate tobj;
 
+use std::borrow::Borrow;
+
+extern crate strum;
+use strum::*;
+#[macro_use]
+extern crate strum_macros;
+
+#[macro_use]
+extern crate structopt;
+use structopt::StructOpt;
+
 mod glm;
 use glm::*;
 
 mod shape;
 use shape::*;
+
+#[derive(Debug, EnumDiscriminants)]
+#[strum_discriminants(name(MaterialType))]
+#[strum_discriminants(repr(u8))]
+#[strum_discriminants(derive(EnumIter,AsRefStr))]
+enum Material {
+    Diffuse(DiffuseMaterial),
+    Mirror(MirrorMaterial),
+    Dielectric(DielectricMaterial),
+    Emissive(EmitterMaterial),
+}
+const MATERIAL_TAG_SHIFT : u32 = 24; // top 8 bits are tag
+
+#[derive(Debug)]
+enum Shape {
+    Sphere(Sphere),
+    Quad(Quad),
+    Plane(Plane),
+}
+
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
@@ -23,7 +54,7 @@ struct DiffuseMaterial {
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 struct MirrorMaterial {
-    dummy: u8,
+    //dummy: u8,
 }
 
 #[repr(C, align(16))]
@@ -56,17 +87,98 @@ struct Camera {
 struct Scene {
     camera: Camera,
 
+    objects: Vec<(Shape, usize)>,
+
+    materials: Vec<Material>,
+}
+
+impl Scene {
+    fn compile(self) -> CompiledScene {
+        let mut spheres = vec![];
+        let mut planes  = vec![];
+        let mut quads   = vec![];
+
+        for (shape, material) in self.objects.into_iter() {
+            match shape {
+                Shape::Sphere(sphere) => spheres.push((sphere, material)),
+                Shape::Plane(plane)   => planes. push((plane,  material)),
+                Shape::Quad(quad)     => quads.  push((quad,   material)),
+            }
+        }
+
+        let mut diffuse    = vec![];
+        let mut dielectric = vec![];
+        let mut emitters  = vec![];
+
+        let mut material_reprs : Vec<u32> = vec![];
+        for mat in self.materials.into_iter() {
+            let tag = MaterialType::from(&mat) as u8;
+            let ix = match mat {
+                Material::Diffuse(x) => {
+                    diffuse.push(x);
+                    diffuse.len()-1
+                },
+                Material::Mirror(MirrorMaterial{}) => {
+                    0
+                }, // no data needed
+                Material::Dielectric(x) => {
+                    dielectric.push(x);
+                    dielectric.len()-1
+                },
+                Material::Emissive(x) => {
+                    emitters.push(x);
+                    emitters.len()-1
+                }
+            };
+            material_reprs.push(((tag as u32) << MATERIAL_TAG_SHIFT) + ix as u32);
+        }
+
+        let mut materials = vec![];
+        for &(_, mat) in &spheres {
+            materials.push(material_reprs[mat]);
+        }
+        for &(_, mat) in &planes {
+            materials.push(material_reprs[mat]);
+        }
+        for &(_, mat) in &quads {
+            materials.push(material_reprs[mat]);
+        }
+
+        let spheres = spheres.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
+        let planes  =  planes.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
+        let quads   =   quads.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
+
+
+        CompiledScene {
+            camera: self.camera,
+            spheres,
+            planes,
+            quads,
+            materials,
+            diffuse,
+            dielectric,
+            emitters,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CompiledScene {
+    camera: Camera,
+
     spheres: Vec<Sphere>,
     planes: Vec<Plane>,
     quads: Vec<Quad>,
+
     materials: Vec<u32>,
 
     diffuse: Vec<DiffuseMaterial>,
-    mirrors: Vec<MirrorMaterial>,
+    //mirrors: Vec<MirrorMaterial>,
     dielectric: Vec<DielectricMaterial>,
     emitters: Vec<EmitterMaterial>,
-    portals: Vec<PortalMaterial>,
+    //portals: Vec<PortalMaterial>,
 }
+
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
@@ -76,26 +188,21 @@ struct SceneBufferInfo {
     num_planes: u32,
     num_quads: u32,
 
+    /*
     num_diffuse: u32,
     num_mirrors: u32,
     num_dielectric: u32,
     num_emitters: u32,
     num_portals: u32,
+    */
 }
+
 
 const BUFFER_ALIGNMENT: usize = 256;
 
 impl Scene {
     fn from_obj<P: AsRef<std::path::Path>>(file: P) -> Self {
         let (models, materials) = tobj::load_obj(file.as_ref()).unwrap();
-
-        enum MaterialType {
-            Diffuse,
-            Mirror,
-            Dielectric,
-            Emissive,
-            Portal
-        };
 
         let angle = -1.5f32.to_radians(); // look down a bit
         let rotation = vec4((0.5*angle).sin(), 0., 0., (0.5*angle).cos());
@@ -106,48 +213,20 @@ impl Scene {
                 rotation,
                 fov: 27.7,
             },
-            spheres: vec![
-                Sphere {
-                    // mirror sphere
-                    position_radius: vec4(-0.421400, 0.332100, -0.280000, 0.3263),
-                },
-                Sphere {
-                    // glass sphere
-                    position_radius: vec4(0.445800, 0.332100, 0.376700, 0.3263),
-                },
-            ],
-            planes: vec![],
-            quads: vec![],
-            materials: vec![5,6],
-
-            diffuse: vec![],
-            mirrors: vec![
-                MirrorMaterial {
-                    dummy: 0,
-                }
-            ],
-            dielectric: vec![
-                DielectricMaterial {
-                    eta_ratio: 1.5,
-                }
-            ],
-            emitters: vec![],
-            portals: vec![],
+            objects: vec![],
+            materials: vec![],
         };
-        let mut material_indices = Vec::<(MaterialType,usize)>::new();
 
         for material in materials.iter() {
             if material.name.starts_with("light") {
                 let power : Vec<f32> = material.unknown_param.get("Ke").unwrap().split(' ').map(|s| s.parse().unwrap()).collect();
-                material_indices.push((MaterialType::Emissive, scene.emitters.len()));
-                scene.emitters.push(EmitterMaterial {
+                scene.materials.push(Material::Emissive(EmitterMaterial {
                     power: vec3(power[0], power[1], power[2]),
-                });
+                }));
             } else {
-                material_indices.push((MaterialType::Diffuse, scene.diffuse.len()));
-                scene.diffuse.push(DiffuseMaterial {
+                scene.materials.push(Material::Diffuse(DiffuseMaterial {
                     color: Vec3::from_array(material.diffuse),
-                })
+                }))
             }
         }
 
@@ -157,14 +236,6 @@ impl Scene {
             let material = match mesh.material_id {
                 Some(x) => x,
                 _ => continue,
-            };
-            let material = &material_indices[material];
-            let material = match material.0 {
-                MaterialType::Diffuse => material.1,
-                MaterialType::Mirror => scene.diffuse.len() + material.1,
-                MaterialType::Dielectric => scene.diffuse.len() + scene.mirrors.len() + material.1,
-                MaterialType::Emissive => scene.diffuse.len() + scene.mirrors.len() + scene.dielectric.len() + material.1,
-                _ => panic!(),
             };
 
             let mut last = [0,0,0];
@@ -198,12 +269,11 @@ impl Scene {
                     let error = (c-(origin+edge1+edge2)).length();
                     if error < 0.01 {
                         // we have a quad!
-                        scene.quads.push(Quad {
+                        scene.objects.push((Shape::Quad(Quad{
                             origin,
                             edge1,
                             edge2
-                        });
-                        scene.materials.push(material as u32);
+                        }), material));
                     }
                 }
 
@@ -211,10 +281,12 @@ impl Scene {
             }
         }
 
-
         scene
-
     }
+
+}
+
+impl CompiledScene {
 
     fn subbuffer_sizes(&self) -> Vec<usize> {
         assert_eq!(
@@ -228,10 +300,10 @@ impl Scene {
             self.quads.len() * std::mem::size_of::<Quad>(),
             self.materials.len() * std::mem::size_of::<u32>(), // align to 16 bytes
             self.diffuse.len() * std::mem::size_of::<DiffuseMaterial>(),
-            self.mirrors.len() * std::mem::size_of::<MirrorMaterial>(),
+            //self.mirrors.len() * std::mem::size_of::<MirrorMaterial>(),
             self.dielectric.len() * std::mem::size_of::<DielectricMaterial>(),
             self.emitters.len() * std::mem::size_of::<EmitterMaterial>(),
-            self.portals.len() * std::mem::size_of::<PortalMaterial>(),
+            //self.portals.len() * std::mem::size_of::<PortalMaterial>(),
         ]
         .iter()
         .map(|size| (size + BUFFER_ALIGNMENT - 1) & !(BUFFER_ALIGNMENT - 1))
@@ -249,12 +321,6 @@ impl Scene {
             num_spheres: self.spheres.len() as u32,
             num_planes: self.planes.len() as u32,
             num_quads: self.quads.len() as u32,
-
-            num_diffuse: self.diffuse.len() as u32,
-            num_mirrors: self.mirrors.len() as u32,
-            num_dielectric: self.dielectric.len() as u32,
-            num_emitters: self.emitters.len() as u32,
-            num_portals: self.portals.len() as u32,
         };
 
         println!("{} bytes left", buffer.len());
@@ -278,10 +344,10 @@ impl Scene {
             put(&mut buffer, &self.materials[..]);
 
             put(&mut buffer, &self.diffuse[..]);
-            put(&mut buffer, &self.mirrors[..]);
+            //put(&mut buffer, &self.mirrors[..]);
             put(&mut buffer, &self.dielectric[..]);
             put(&mut buffer, &self.emitters[..]);
-            put(&mut buffer, &self.portals[..]);
+            //put(&mut buffer, &self.portals[..]);
         }
 
         assert!(buffer.is_empty()); // we filled the buffer
@@ -394,6 +460,7 @@ impl GPU {
         }
     }
 
+    //fn load_shader_from_file<'a, P: AsRef<std::path::Path>, I: IntoIterator<Item=&'a(&'a str, X)>, X: 'a+Borrow<str>>(
     fn load_shader_from_file<P: AsRef<std::path::Path>>(
         &mut self,
         path: P,
@@ -412,7 +479,7 @@ impl GPU {
             })
         });
         for (name, value) in definitions {
-            compile_options.add_macro_definition(name, Some(value));
+            compile_options.add_macro_definition(name, Some(value.borrow()));
         }
 
         let compiled = self
@@ -442,12 +509,20 @@ struct IntegratorPipeline {
 impl IntegratorPipeline {
     fn new(
         gpu: &mut GPU,
-        scene: &Scene,
+        scene: &CompiledScene,
         scene_buffer: &wgpu::Buffer,
         current_block: &wgpu::Buffer,
         output: &wgpu::TextureView,
     ) -> Self {
-        let shader_module = gpu.load_shader_from_file("shader/render.glsl", &[]);
+        let mut definitions = vec![];
+        definitions.push(("MATERIAL_TAG_SHIFT".to_owned(), format!("{}", MATERIAL_TAG_SHIFT)));
+        for material_type in MaterialType::iter() {
+            definitions.push((
+                    format!("MATERIAL_TAG_{}", material_type.as_ref().to_uppercase()),
+                    format!("{}", material_type as u8),
+                    ));
+        }
+        let shader_module = gpu.load_shader_from_file("shader/render.glsl", &definitions.iter().map(|(a,b)| (a.as_ref(), b.as_ref())).collect::<Vec<(&str, &str)>>()[..]);
         let device = &mut gpu.device;
 
         let scene_subbuffer_sizes = scene.subbuffer_sizes();
@@ -792,7 +867,7 @@ struct Renderer {
     all_blocks: wgpu::Buffer,
     current_block: wgpu::Buffer,
 
-    scene: Scene,
+    scene: CompiledScene,
     scene_buffer: wgpu::Buffer,
 
     intermediate_texture: wgpu::Texture,
@@ -803,10 +878,12 @@ struct Renderer {
     integrator_pipeline: IntegratorPipeline,
     reconstruction_pipeline: ReconstructionPipeline,
     preview_pipeline: PreviewPipeline,
+
+    present_interval: u32, // how often to update preview
 }
 
 impl Renderer {
-    fn new(scene: Scene, generator: ImageBlockGenerator) -> Self {
+    fn new(scene: CompiledScene, generator: ImageBlockGenerator, present_interval: u32) -> Self {
         let width = generator.width;
         let height = generator.height;
 
@@ -948,6 +1025,8 @@ impl Renderer {
             integrator_pipeline,
             reconstruction_pipeline,
             preview_pipeline,
+
+            present_interval,
         }
     }
 
@@ -970,7 +1049,7 @@ impl Renderer {
             let mut frame_keepalive = None;
             let mut closed = false;
 
-            if block.id % 128 == 0 {
+            if block.id % self.present_interval == 0 {
                 self.preview_pipeline.window.set_title(&format!("{:3.3}% {}/{}", 100. * block.id as f32 / self.blocks.len() as f32, block.id, self.blocks.len()));
                 let (a, b) = self.preview_pipeline.update(&mut encoder);
                 closed = a;
@@ -1061,131 +1140,46 @@ impl Renderer {
     }
 }
 
+#[derive(StructOpt)]
+struct Opt {
+    /// Add a mirror and glass sphere to the scene
+    #[structopt(long)]
+    put_cbox_spheres: bool,
+
+    /// How often to update preview during rendering
+    #[structopt(long, default_value="128")]
+    present_interval: u32,
+
+    #[structopt(short,long,default_value="64")]
+    sample_count: u32,
+
+    #[structopt(short,long,default_value="/tmp/output.exr")]
+    output_image: std::path::PathBuf,
+
+    /// The scene (OBJ file) to render
+    scene: std::path::PathBuf,
+}
+
+
 fn main() {
-    /*
-    let mut gpu = GPU::new();
-    let mut preview = PreviewPipeline::new(&mut gpu, 800, 600);
-    loop {
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {todo: 0});
-        let (closed, frame_keepalive) = preview.update(&mut encoder);
-        gpu.queue.submit(&[encoder.finish()]);
-        drop(frame_keepalive);
+    let opt = Opt::from_args();
+
+    let mut scene = Scene::from_obj(opt.scene);
+    if opt.put_cbox_spheres {
+        scene.materials.push(Material::Mirror(MirrorMaterial{}));
+        scene.materials.push(Material::Dielectric(DielectricMaterial{eta_ratio: 1.5}));
+        scene.objects.push((Shape::Sphere(Sphere {
+                    // mirror sphere
+                    position_radius: vec4(-0.421400, 0.332100, -0.280000, 0.3263),
+                }), scene.materials.len()-2));
+        scene.objects.push((Shape::Sphere(Sphere {
+                    // glass sphere
+                    position_radius: vec4(0.445800, 0.332100, 0.376700, 0.3263),
+                }), scene.materials.len()-1));
     }
-    */
-    /*
-    let scene = Scene {
-        // cornell box
-        camera: Camera {
-            position: vec4(0., 0.91, 5.41, 0.0),
-            rotation: vec4(0., 0., 0., 1.),
-            fov: 27.7,
-        },
-        spheres: vec![
-            Sphere {
-                // mirror sphere
-                position_radius: vec4(-0.421400, 0.332100, -0.280000, 0.3263),
-            },
-            Sphere {
-                // glass sphere
-                position_radius: vec4(0.445800, 0.332100, 0.376700, 0.3263),
-            },
-            /*Sphere {
-                // light sphere
-                position_radius: vec4(-0.6, 1.25, 0., 0.2),
-                //position_radius: vec4(-0.1, 1.0, 0.376700, 0.3263),
-            },*/
-        ],
-        planes: vec![
-            /*
-            Plane {
-                normal_offset: vec4(
-                    // right wall pointing to the left
-                    -1., 0., 0., 1.,
-                ),
-            },
-            Plane {
-                normal_offset: vec4(
-                    // left wall pointing to the right
-                    1., 0., 0., 1.,
-                ),
-            },
-            Plane {
-                normal_offset: vec4(
-                    // ceiling
-                    0., -1.0, 0., 1.59,
-                ),
-            },
-            Plane {
-                normal_offset: vec4(
-                    // floor
-                    0., 1.0, 0., 0.,
-                ),
-            },
-            */
-            Plane {
-                normal_offset: vec4(
-                    // back
-                    0., 0., 1.0, 1.04,
-                ),
-            },
-        ],
-        quads: vec![
-            Quad { // light
-                origin: vec3(-0.24, 1.58, -0.22),
-                edge1: vec3(0.24 + 0.23, 0., 0.),
-                edge2: vec3(0., 0., 0.22 + 0.16),
-            },
-            Quad { // ceiling
-                origin: vec3(-1.,1.59,1.),
-                edge1: vec3(0.,0.,-2.),
-                edge2: vec3(2., 0., 0.),
-            },
-        ],
-        materials: vec![
-            3, // mirror sphere
-            4, // glass sphere,
-            0, // back
-            0, // ceiling
-            0, // floor
-            5, // emissive quad
-            //2, // right wall
-            //1, // left wall,
-        ],
 
-        diffuse: vec![
-            DiffuseMaterial {
-                color: vec3(0.725, 0.71, 0.68),
-            }, // material 0: white diffuse
-            DiffuseMaterial {
-                color: vec3(0.630, 0.065, 0.05),
-            }, // material 1: red diffuse
-            DiffuseMaterial {
-                color: vec3(0.161, 0.133, 0.427),
-            }, // material 2: blue diffuse
-        ],
-        mirrors: vec![
-            MirrorMaterial { dummy: 0 }, // material 3: perfect mirror
-        ],
-        dielectric: vec![DielectricMaterial {
-            // material 4: glass
-            eta_ratio: 1.5046,
-        }],
-        emitters: vec![
-            EmitterMaterial {
-                power: vec3(15., 15., 15.), // material 5: white emitter
-            },
-            EmitterMaterial {
-                power: vec3(0., 0., 0.), // material 6: black hole
-            },
-        ],
-        portals: vec![],
-    };
-    */
-
-    let scene = Scene::from_obj("scenes/cbox.obj");
-    dbg!(&scene);
-    let block_generator = ImageBlockGenerator::new(800, 600, 128, 512);
-    let mut renderer = Renderer::new(scene, block_generator);
+    let block_generator = ImageBlockGenerator::new(800, 600, 128, opt.sample_count);
+    let mut renderer = Renderer::new(scene.compile(), block_generator, opt.present_interval);
     renderer.render();
-    renderer.save_image("/tmp/output.exr");
+    renderer.save_image(opt.output_image);
 }

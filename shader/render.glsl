@@ -96,112 +96,49 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		}
 
 		uint mat = materials[its.objectID];
-
-		bool wasPortal = false;
-		if (mat < numDiffuse) {
-			if (!hasAlbedo) {
-				albedo = diffuseMaterials[mat].color;
-				hasAlbedo = true;
-			}
-			// sample emitter
-			// TODO: true and flexible MIS
-			
-			{
-				ShapeQueryRecord sRec;
-				sampleQuad(quads[2], sRec);
+		uint material_tag = mat >> MATERIAL_TAG_SHIFT;
+		uint material_idx = mat & ((1<<MATERIAL_TAG_SHIFT) - 1);
 
 
-				vec3 toLight = sRec.p - its.p;
-				float r = length(toLight);
-				toLight /= r;
-				float cosTheta = dot(toLight, its.n);
-				if (cosTheta > 0) {
-					float cosThetaL = -dot(toLight, sRec.n);
-					if (cosThetaL > 0) {
-						float pdf = sRec.pdf * r*r / cosThetaL;
+		if (material_tag == MATERIAL_TAG_EMISSIVE && wasDiscrete) {
+			total += throughput * emissiveMaterials[material_idx].power;
+		}
+		if (material_tag == MATERIAL_TAG_DIFFUSE) {
+			ShapeQueryRecord sRec;
+			sampleQuad(quads[2], sRec);
 
-						Ray shadowRay;
-						shadowRay.origin = its.p;
-						shadowRay.direction = toLight;
-						shadowRay.tMin = 2.*M_EPS;
-						shadowRay.tMax = r-M_EPS;
-						
-						if (!intersectScene(shadowRay)) {
-							total += throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf;
-						}
+
+			vec3 toLight = sRec.p - its.p;
+			float r = length(toLight);
+			toLight /= r;
+			float cosTheta = dot(toLight, its.n);
+			if (cosTheta > 0) {
+				float cosThetaL = -dot(toLight, sRec.n);
+				if (cosThetaL > 0) {
+					float pdf = sRec.pdf * r*r / cosThetaL;
+
+					Ray shadowRay;
+					shadowRay.origin = its.p;
+					shadowRay.direction = toLight;
+					shadowRay.tMin = 2.*M_EPS;
+					shadowRay.tMax = r-M_EPS;
+					
+					if (!intersectScene(shadowRay)) {
+						total += throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf;
 					}
 				}
 			}
-			wasDiscrete = false;
-			vec3 wo = randCosHemisphere();
-			vec4 localToWorld = quaternionFromTo(vec3(0.,0.,1), its.n);
-			ray.direction = quaternionRotate(wo, localToWorld);
-
-			throughput *= diffuseMaterials[mat].color;
-		} else {
-			mat -= numDiffuse;
-			if (mat < numMirrors) {
-				ray.direction = normalize(reflect(ray.direction, normalize(its.n)));
-			} else {
-				mat -= numMirrors;
-				if (mat < numDielectric) {
-					// TODO: optimize
-					float eta = dielectricMaterials[mat].etaRatio;
-					float etaInv = 1. / eta;
-					float cosThetaI = -dot(its.n, ray.direction);
-					vec3 normal = its.n;
-					if (cosThetaI < 0) {
-						eta = etaInv;
-						etaInv = 1. / eta;
-						normal = -normal;
-						cosThetaI = -cosThetaI;
-					}
-
-					float k = 1.0 - etaInv*etaInv * (1-cosThetaI*cosThetaI);
-
-					if (k <= 0) {
-						// reflect
-						ray.direction = reflect(ray.direction, normal);
-					} else {
-						float cosThetaO = sqrt(k);
-
-						float rho_par  = (eta*cosThetaI-cosThetaO)/(eta*cosThetaI+cosThetaO);
-						float rho_orth = (cosThetaI-eta*cosThetaO)/(cosThetaI+eta*cosThetaO);
-
-						float f_r = 0.5 * (rho_par*rho_par + rho_orth*rho_orth);
-						if (randUniformFloat() < f_r) {
-							ray.direction = reflect(ray.direction, normal);
-						} else {
-							vec3 parallel = ray.direction - dot(ray.direction, normal) * normal;
-							// refract
-							ray.direction = etaInv * parallel - sqrt(k) * normal;
-						}
-						
-					}
-				} else {
-					mat -= numDielectric;
-					if (mat < numEmitters) {
-						// emitters
-						if (wasDiscrete) {
-							total += throughput * emissiveMaterials[mat].power;
-						}
-						break;
-					} else {
-						mat -= numEmitters;
-						ray.direction = normalize((portalMaterials[mat].transform * vec4(ray.direction, 0)).xyz);
-						ray.origin    = (portalMaterials[mat].transform * vec4(its.p, 1)).xyz;
-						wasPortal = true;
-					}
-				}
-			}
-			wasDiscrete = true;
 		}
 
-		if (!wasPortal) {
-			ray.origin = its.p;
-		}
+		
+		vec3 wo;
+		throughput *= sampleBSDF(mat, ray.direction, its.n, wo);
+		ray.direction = wo;
+		ray.origin = its.p;
 		ray.tMin = 2.*M_EPS;
 		ray.tMax = 1e100;
+
+		wasDiscrete = material_tag != MATERIAL_TAG_DIFFUSE;
 
 		if (bounce > 3) {
 			float q = min(0.99, max(throughput.r, max(throughput.g, throughput.b)));

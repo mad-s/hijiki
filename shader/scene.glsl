@@ -3,12 +3,6 @@ layout(set = 0, binding = 2) buffer SceneBufferInfo {
 	int numSpheres;
 	int numPlanes;
 	int numQuads;
-
-	int numDiffuse;
-	int numMirrors;
-	int numDielectric;
-	int numEmitters;
-	int numPortals;
 };
 
 layout(set = 0, binding = 3) buffer Spheres {
