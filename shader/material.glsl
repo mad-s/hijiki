@@ -28,7 +28,7 @@ vec3 evalBSDF(uint material, vec3 wi, vec3 n, vec3 wo) {
 }
 
 // TODO: tangent space?
-vec3 sampleBSDF(uint material, vec3 wi, vec3 n, out vec3 wo) {
+vec3 sampleBSDF(uint material, vec3 wi, vec3 n, out vec3 wo, inout vec3 extinction) {
 	uint tag = material >> MATERIAL_TAG_SHIFT;
 	uint idx = material & ((1 << MATERIAL_TAG_SHIFT)-1);
 	switch(tag) {
@@ -41,10 +41,11 @@ vec3 sampleBSDF(uint material, vec3 wi, vec3 n, out vec3 wo) {
 			wo = reflect(wi, n);
 			return vec3(1.);
 		case MATERIAL_TAG_DIELECTRIC:
-			float eta = dielectricMaterials[idx].etaRatio;
+			float eta = dielectricMaterials[idx].extinction_etaRatio.w;
 			float etaInv = 1. / eta;
 			float cosThetaI = -dot(n, wi);
 			vec3 normal = n;
+                        bool isInsideDielectric = cosThetaI > 0;
 			if (cosThetaI < 0) {
 				eta = etaInv;
 				etaInv = 1. / eta;
@@ -67,11 +68,15 @@ vec3 sampleBSDF(uint material, vec3 wi, vec3 n, out vec3 wo) {
 				if (randUniformFloat() < f_r) {
 					wo = reflect(wi, normal);
 				} else {
+                                        isInsideDielectric = !isInsideDielectric;
 					vec3 parallel = wi - dot(wi, normal) * normal;
 					// refract
 					wo = etaInv * parallel - sqrt(k) * normal;
 				}
 			}
+                        if (isInsideDielectric) {
+                                extinction = dielectricMaterials[idx].extinction_etaRatio.rgb;
+                        }
 			return vec3(1.);
 		case MATERIAL_TAG_EMISSIVE:
 			return vec3(0.);

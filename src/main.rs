@@ -60,7 +60,21 @@ struct MirrorMaterial {
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 struct DielectricMaterial {
-    eta_ratio: f32,
+    extinction_eta: Vec4,
+}
+
+impl DielectricMaterial {
+    fn clear(eta_ratio: f32) -> DielectricMaterial {
+        DielectricMaterial {
+            extinction_eta: vec4(0., 0., 0., eta_ratio),
+        }
+    }
+
+    fn tinted(extinction: Vec3, eta_ratio: f32) -> DielectricMaterial {
+        DielectricMaterial {
+            extinction_eta: vec4(extinction[0], extinction[1], extinction[2], eta_ratio),
+        }
+    }
 }
 
 #[repr(C, align(16))]
@@ -1167,7 +1181,8 @@ fn main() {
     let mut scene = Scene::from_obj(opt.scene);
     if opt.put_cbox_spheres {
         scene.materials.push(Material::Mirror(MirrorMaterial{}));
-        scene.materials.push(Material::Dielectric(DielectricMaterial{eta_ratio: 1.5}));
+        //scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
+        scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(1., 1., 0.), 1.5)));
         scene.objects.push((Shape::Sphere(Sphere {
                     // mirror sphere
                     position_radius: vec4(-0.421400, 0.332100, -0.280000, 0.3263),

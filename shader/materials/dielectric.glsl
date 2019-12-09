@@ -1,4 +1,3 @@
 struct DielectricMaterial {
-	float etaRatio;
-	float pad[3];
+        vec4 extinction_etaRatio;
 };

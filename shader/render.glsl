@@ -74,6 +74,7 @@ layout(set = 0, binding = 0) buffer CurrentImageBlock {
 layout(RGBA32F, set=0, binding=1) uniform image2DArray outputImage;
 
 void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out vec3 normal) {
+        vec3 currentExtinction = vec3(0.);
 	total = vec3(0.);
 	bool hasAlbedo = false;
 	albedo = vec3(0.);
@@ -99,6 +100,8 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		uint material_tag = mat >> MATERIAL_TAG_SHIFT;
 		uint material_idx = mat & ((1<<MATERIAL_TAG_SHIFT) - 1);
 
+                float dist = distance(ray.origin, its.p);
+                throughput *= exp(-currentExtinction * dist);
 
 		if (material_tag == MATERIAL_TAG_EMISSIVE && wasDiscrete) {
 			total += throughput * emissiveMaterials[material_idx].power;
@@ -132,7 +135,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 
 		
 		vec3 wo;
-		throughput *= sampleBSDF(mat, ray.direction, its.n, wo);
+		throughput *= sampleBSDF(mat, ray.direction, its.n, wo, currentExtinction);
 		ray.direction = wo;
 		ray.origin = its.p;
 		ray.tMin = 2.*M_EPS;
