@@ -1,12 +1,12 @@
-layout(set = 0, binding = 7) buffer DiffuseMaterials {
+layout(set = 0, binding = BINDING_DIFFUSE) buffer DiffuseMaterials {
 	 DiffuseMaterial diffuseMaterials[];
 };
 
-layout(set = 0, binding = 8) buffer DielectricMaterials {
+layout(set = 0, binding = BINDING_DIELECTRIC) buffer DielectricMaterials {
 	 DielectricMaterial dielectricMaterials[];
 };
 
-layout(set = 0, binding = 9) buffer EmissiveMaterials {
+layout(set = 0, binding = BINDING_EMISSIVE) buffer EmissiveMaterials {
 	 EmissiveMaterial emissiveMaterials[];
 };
 

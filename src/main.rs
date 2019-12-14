@@ -178,11 +178,9 @@ impl Scene {
             }
         }
         calculate_indices(0, &bvh.nodes, &mut indices, &mut 0);
-        println!("{:?}", indices);
         fn flatten_bvh(current: usize, aabb: AABB, skip_index: usize, nodes: &[bvh::bvh::BVHNode], flat: &mut Vec<CompiledBVHNode>, indices: &[usize]) {
             let node = nodes[current];
             let shape = node.shape_index();
-            println!("{:?} => {:?}", current, flat.len());
             flat.push(CompiledBVHNode {
                 aabb_min: aabb.min,
                 shape_index: shape.map(|x| x as u32).unwrap_or(u32::max_value()),
@@ -210,7 +208,6 @@ impl Scene {
             node.shape_index = (shape_indices[node.shape_index as usize] + offset) as u32;
         }
         let bvh = flat;
-        println!("{:#?}", bvh);
 
         let mut diffuse    = vec![];
         let mut dielectric = vec![];
@@ -250,9 +247,33 @@ impl Scene {
         let spheres = spheres.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
         let quads   =   quads.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
 
+        let bindings = [
+            ("scene", std::mem::size_of::<SceneBufferInfo>()),
+            ("bvh", std::mem::size_of_val(&bvh[..])),
+            ("spheres", std::mem::size_of_val(&spheres[..])),
+            ("quads", std::mem::size_of_val(&quads[..])),
+            ("materials", std::mem::size_of_val(&materials[..])),
+            ("diffuse", std::mem::size_of_val(&diffuse[..])),
+            ("dielectric", std::mem::size_of_val(&dielectric[..])),
+            ("emissive", std::mem::size_of_val(&emitters[..])),
+        ].into_iter().scan((0u32,0u64), |&mut (ref mut index, ref mut offset), (name,size)| {
+            let size = (size+BUFFER_ALIGNMENT-1)&!(BUFFER_ALIGNMENT-1);
+            let size = size as wgpu::BufferAddress;
+            let res = Some(BindingInfo {
+                index: *index,
+                name,
+                offset: *offset,
+                size
+            });
+            *offset += size;
+            *index += 1;
+            res
+        }).collect::<Vec<BindingInfo>>();
+
 
         CompiledScene {
             camera: self.camera,
+            bindings,
             spheres,
             quads,
             bvh,
@@ -265,8 +286,18 @@ impl Scene {
 }
 
 #[derive(Debug)]
+struct BindingInfo {
+    name: &'static str,
+    index: u32,
+    offset: wgpu::BufferAddress,
+    size: wgpu::BufferAddress,
+}
+
+#[derive(Debug)]
 struct CompiledScene {
     camera: Camera,
+
+    bindings: Vec<BindingInfo>,
 
     bvh: Vec<CompiledBVHNode>,
 
@@ -380,6 +411,7 @@ impl Scene {
 
 impl CompiledScene {
 
+    /*
     fn subbuffer_sizes(&self) -> Vec<usize> {
         assert_eq!(
             self.spheres.len() + self.quads.len(),
@@ -402,6 +434,7 @@ impl CompiledScene {
         .map(|size| (size + BUFFER_ALIGNMENT - 1) & !(BUFFER_ALIGNMENT - 1))
         .collect()
     }
+    */
 
     fn write_to_buffer(&self, mut buffer: &mut [u8]) {
         assert_eq!(
@@ -415,18 +448,15 @@ impl CompiledScene {
             num_quads: self.quads.len() as u32,
         };
 
-        println!("{} bytes left", buffer.len());
         unsafe fn put<T: Copy>(buffer: &mut &mut [u8], data: &[T]) {
             let len = buffer.len();
             let size = (data.len() * std::mem::size_of::<T>() + BUFFER_ALIGNMENT - 1)
                 & !(BUFFER_ALIGNMENT - 1); // align to buffer size
-            println!("putting {} bytes", size);
             assert!(len >= size);
             let ptr = buffer.as_mut_ptr() as *mut T;
             let target: &mut [T] = std::slice::from_raw_parts_mut(ptr, data.len());
             target.copy_from_slice(data);
             *buffer = std::slice::from_raw_parts_mut((ptr as *mut u8).add(size), len - size);
-            println!("{} bytes left", buffer.len());
         }
         unsafe {
             put(&mut buffer, std::slice::from_ref(&info));
@@ -605,8 +635,16 @@ impl IntegratorPipeline {
         scene_buffer: &wgpu::Buffer,
         current_block: &wgpu::Buffer,
         output: &wgpu::TextureView,
+        use_bvh: bool,
     ) -> Self {
         let mut definitions = vec![];
+        for binding in &scene.bindings {
+            definitions.push((
+                    format!("BINDING_{}", binding.name.to_uppercase()),
+                    format!("{}", binding.index+2)
+                    ));
+        }
+        definitions.push(("USE_BVH".to_owned(), if use_bvh {"1".to_owned()} else {"0".to_owned()}));
         definitions.push(("MATERIAL_TAG_SHIFT".to_owned(), format!("{}", MATERIAL_TAG_SHIFT)));
         for material_type in MaterialType::iter() {
             definitions.push((
@@ -617,7 +655,7 @@ impl IntegratorPipeline {
         let shader_module = gpu.load_shader_from_file("shader/render.glsl", &definitions.iter().map(|(a,b)| (a.as_ref(), b.as_ref())).collect::<Vec<(&str, &str)>>()[..]);
         let device = &mut gpu.device;
 
-        let scene_subbuffer_sizes = scene.subbuffer_sizes();
+        //let scene_subbuffer_sizes = scene.subbuffer_sizes();
         let mut bindings = vec![
             wgpu::BindGroupLayoutBinding {
                 binding: 0,
@@ -637,6 +675,17 @@ impl IntegratorPipeline {
                 },
             },
         ];
+        for binding in &scene.bindings {
+            bindings.push(wgpu::BindGroupLayoutBinding {
+                binding: 2 + binding.index,
+                visibility: wgpu::ShaderStage::COMPUTE,
+                ty: wgpu::BindingType::StorageBuffer {
+                    dynamic: false,
+                    readonly: false,
+                },
+            });
+        }
+        /*
         for (i, _) in scene_subbuffer_sizes.iter().enumerate() {
             bindings.push(wgpu::BindGroupLayoutBinding {
                 binding: 2 + i as u32,
@@ -647,6 +696,7 @@ impl IntegratorPipeline {
                 },
             });
         }
+        */
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             bindings: &bindings[..],
         });
@@ -664,6 +714,16 @@ impl IntegratorPipeline {
                 resource: wgpu::BindingResource::TextureView(output),
             },
         ];
+        for binding in &scene.bindings {
+            bindings.push(wgpu::Binding {
+                binding: 2 + binding.index,
+                resource: wgpu::BindingResource::Buffer {
+                    buffer: &scene_buffer,
+                    range: binding.offset..binding.offset+binding.size,
+                },
+            });
+        }
+        /*
         let mut offs = 0;
         for (i, size) in scene_subbuffer_sizes.iter().enumerate() {
             let size = *size as wgpu::BufferAddress;
@@ -676,6 +736,7 @@ impl IntegratorPipeline {
             });
             offs += size;
         }
+        */
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &bind_group_layout,
             bindings: &bindings[..],
@@ -702,7 +763,6 @@ impl IntegratorPipeline {
         cpass.set_pipeline(&self.pipeline);
         cpass.set_bind_group(0, &self.bind_group, &[]);
         cpass.dispatch((block.dimension[0]+15)/16, (block.dimension[1]+15)/16, 1);
-        //println!("{:?}", block);
         drop(cpass);
     }
 }
@@ -809,7 +869,6 @@ impl ReconstructionPipeline {
             (block.dimension[1] + 2*self.radius+15)/16,
             1,
         );
-        //println!("{:?}", block);
         drop(cpass);
     }
 }
@@ -975,7 +1034,7 @@ struct Renderer {
 }
 
 impl Renderer {
-    fn new(scene: CompiledScene, generator: ImageBlockGenerator, present_interval: u32) -> Self {
+    fn new(scene: CompiledScene, generator: ImageBlockGenerator, present_interval: u32, use_bvh: bool) -> Self {
         let width = generator.width;
         let height = generator.height;
 
@@ -993,7 +1052,8 @@ impl Renderer {
             usage: wgpu::BufferUsage::STORAGE | wgpu::BufferUsage::COPY_DST,
         });
 
-        let scene_buffer_size = scene.subbuffer_sizes().iter().sum::<usize>();
+        //let scene_buffer_size = scene.subbuffer_sizes().iter().sum::<usize>();
+        let scene_buffer_size = scene.bindings.iter().map(|binding| binding.size as usize).sum::<usize>();
         let mut scene_staging_buffer =
             device.create_buffer_mapped::<u8>(scene_buffer_size, wgpu::BufferUsage::COPY_SRC);
         scene.write_to_buffer(scene_staging_buffer.data);
@@ -1084,6 +1144,7 @@ impl Renderer {
             &scene_buffer,
             &current_block,
             &intermediate_texture.create_default_view(),
+            use_bvh,
         );
         let reconstruction_pipeline = ReconstructionPipeline::new(
             &mut gpu,
@@ -1238,6 +1299,18 @@ struct Opt {
     #[structopt(long)]
     put_cbox_spheres: bool,
 
+    /// Use a BVH to optimize intersections
+    #[structopt(long)]
+    use_bvh: bool,
+
+    /// Width of the image
+    #[structopt(long,short, default_value="800")]
+    width: u32,
+
+    /// Height of the image
+    #[structopt(long,short, default_value="600")]
+    height: u32,
+
     /// How often to update preview during rendering
     #[structopt(long, default_value="128")]
     present_interval: u32,
@@ -1260,7 +1333,7 @@ fn main() {
     if opt.put_cbox_spheres {
         scene.materials.push(Material::Mirror(MirrorMaterial{}));
         //scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
-        scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(1., 1., 0.), 1.5)));
+        scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(1., 0., 1.), 1.5)));
         scene.objects.push((Shape::Sphere(Sphere {
                     // mirror sphere
                     position: Point3::new(-0.421400, 0.332100, -0.280000),
@@ -1273,8 +1346,13 @@ fn main() {
                 }), scene.materials.len()-1));
     }
 
-    let block_generator = ImageBlockGenerator::new(800, 600, 128, opt.sample_count);
-    let mut renderer = Renderer::new(scene.compile(), block_generator, opt.present_interval);
+    let block_generator = ImageBlockGenerator::new(opt.width, opt.height, 128, opt.sample_count);
+    let mut renderer = Renderer::new(scene.compile(), block_generator, opt.present_interval, opt.use_bvh);
+    let start = std::time::Instant::now();
+    println!("Starting to render...");
     renderer.render();
+    let render_time = std::time::Instant::now()-start;
+    let ray_count = opt.width*opt.height*opt.sample_count;
+    println!("Integrated {} rays in {:?} ({} rays/s)", ray_count, render_time, ray_count as f64 / render_time.as_secs_f64());
     renderer.save_image(opt.output_image);
 }

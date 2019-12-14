@@ -1,4 +1,4 @@
-layout(set = 0, binding = 2) buffer SceneBufferInfo {
+layout(set = 0, binding = BINDING_SCENE) buffer SceneBufferInfo {
 	Camera camera;
 	int numSpheres;
 	int numQuads;
@@ -9,23 +9,22 @@ struct BVHNode {
 	vec4 aabbMaxExitIndex;
 };
 
-layout(set = 0, binding = 3) buffer BVH {
+layout(set = 0, binding = BINDING_BVH) buffer BVH {
 	BVHNode bvh[];
 };
 
-layout(set = 0, binding = 4) buffer Spheres {
+layout(set = 0, binding = BINDING_SPHERES) buffer Spheres {
 	Sphere spheres[];
 };
 
-layout(set = 0, binding = 5) buffer Quads {
+layout(set = 0, binding = BINDING_QUADS) buffer Quads {
 	Quad quads[];
 };
 
-layout(set = 0, binding = 6) buffer Materials {
+layout(set = 0, binding = BINDING_MATERIALS) buffer Materials {
 	uint materials[];
 };
 
-// TODO: use BVH
 bool intersectScene(Ray ray, out Intersection its);
 bool intersectScene(Ray ray) {
 	// TODO: optimize
@@ -33,9 +32,10 @@ bool intersectScene(Ray ray) {
 	return intersectScene(ray, dummy);
 }
 bool intersectScene(Ray ray, out Intersection its) {
+	its.objectID = -1;
+#if USE_BVH == 1
 	vec3 invRayDir = 1.0 / ray.direction;
 	vec3 timeOffset = -ray.origin * invRayDir;
-	its.objectID = -1;
 	for(uint currentNode = 0; currentNode < bvh.length(); ) {
 		uint shapeIndex = floatBitsToUint(bvh[currentNode].aabbMinShapeIndex.w);
 		uint exitIndex  = floatBitsToUint(bvh[currentNode].aabbMaxExitIndex.w);
@@ -65,8 +65,8 @@ bool intersectScene(Ray ray, out Intersection its) {
 			}
 		}
 	}
-	/*
-	if (numSpheres > 100 || numPlanes > 100) {
+#else
+	if (numSpheres > 100 || numQuads > 100) {
 		// failsafe
 		return false;
 	}
@@ -80,10 +80,10 @@ bool intersectScene(Ray ray, out Intersection its) {
 	for (int i = 0; i < numQuads; i++) {
 		if (intersectQuad(ray, quads[i], its)) {
 			ray.tMax = its.t - M_EPS;
-			its.objectID = numSpheres + numPlanes + i;
+			its.objectID = numSpheres + i;
 		}
 	}
-	*/
+#endif
 	
 	if (its.objectID == -1) {
 		return false;
