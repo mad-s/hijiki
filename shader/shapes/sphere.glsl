@@ -40,6 +40,17 @@ bool intersectSphere(Ray ray, Sphere sphere, inout Intersection its) {
 	return false;
 }
 
+void populateSphereIntersection(Sphere sphere, inout Intersection its) {
+	vec3 n = its.n = (its.p - sphere.positionRadius.xyz) / sphere.positionRadius.w;
+	vec3 t = normalize(vec3(-n.z, 0., n.x));
+	vec3 b = cross(n, t);
+	its.frame = mat3(t, b, n);
+	its.uv = vec2(0.5+atan(n.z,n.x)/(2*M_PI), 0.5+asin(clamp(n.y, -1, 1))/M_PI);
+	if(isnan(its.uv.x)) {
+		its.uv.x = 0.;
+	}
+}
+
 void sampleSphere(Sphere sphere, out ShapeQueryRecord sRec) {
 	sRec.n = randUniformSphere();
 	sRec.p = sphere.positionRadius.xyz + sphere.positionRadius.w * sRec.n;

@@ -42,6 +42,7 @@ struct Intersection {
 	vec3 p;
 	vec3 n;
 	vec2 uv;
+	mat3 frame;
 };
 
 struct ShapeQueryRecord {
@@ -89,6 +90,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		if (!intersectScene(ray, its)) {
 			return;
 		}
+
 		if (bounce == 0) {
 			depth  = its.t;
 			normal = its.n;
@@ -124,7 +126,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 					shadowRay.tMax = r-M_EPS;
 					
 					if (!intersectScene(shadowRay)) {
-						total += throughput * diffuseMaterials[mat].color / M_PI * cosTheta * emissiveMaterials[0].power / pdf;
+						total += throughput * evalBSDF(mat, toLight, its, -ray.direction) * emissiveMaterials[0].power / pdf;
 					}
 				}
 			}
@@ -132,7 +134,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 
 		
 		vec3 wo;
-		throughput *= sampleBSDF(mat, ray.direction, its.n, wo, currentExtinction);
+		throughput *= sampleBSDF(mat, ray.direction, its, wo, currentExtinction);
 		ray.direction = wo;
 		ray.origin = its.p;
 		ray.tMin = 2.*M_EPS;

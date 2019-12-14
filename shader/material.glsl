@@ -11,34 +11,36 @@ layout(set = 0, binding = BINDING_EMISSIVE) buffer EmissiveMaterials {
 };
 
 
-vec3 evalBSDF(uint material, vec3 wi, vec3 n, vec3 wo) {
+vec3 evalBSDF(uint material, vec3 wi, Intersection its, vec3 wo) {
 	uint tag = material >> MATERIAL_TAG_SHIFT;
 	uint idx = material & ((1 << MATERIAL_TAG_SHIFT)-1);
 	if (tag == MATERIAL_TAG_DIFFUSE) {
-		return dot(n,wi) * diffuseMaterials[idx].color / M_PI;
+		vec3 color = diffuseMaterials[idx].color;
+		return dot(its.n,wi) * color / M_PI;
 	} else {
 		return vec3(0.);
 	}
 }
 
 // TODO: tangent space?
-vec3 sampleBSDF(uint material, vec3 wi, vec3 n, out vec3 wo, inout vec3 extinction) {
+vec3 sampleBSDF(uint material, vec3 wi, Intersection its, out vec3 wo, inout vec3 extinction) {
 	uint tag = material >> MATERIAL_TAG_SHIFT;
 	uint idx = material & ((1 << MATERIAL_TAG_SHIFT)-1);
 	switch(tag) {
 		case MATERIAL_TAG_DIFFUSE:
 			vec3 wo_local = randCosHemisphere();
-			vec4 localToWorld = quaternionFromTo(vec3(0.,0.,1), n);
-			wo = quaternionRotate(wo_local, localToWorld);
+			//vec4 localToWorld = quaternionFromTo(vec3(0.,0.,1), n);
+			//wo = quaternionRotate(wo_local, localToWorld);
+			wo = its.frame * wo_local;
 			return diffuseMaterials[idx].color;
 		case MATERIAL_TAG_MIRROR:
-			wo = reflect(wi, n);
+			wo = reflect(wi, its.n);
 			return vec3(1.);
 		case MATERIAL_TAG_DIELECTRIC:
 			float eta = dielectricMaterials[idx].extinction_etaRatio.w;
 			float etaInv = 1. / eta;
-			float cosThetaI = -dot(n, wi);
-			vec3 normal = n;
+			float cosThetaI = -dot(its.n, wi);
+			vec3 normal = its.n;
                         bool isInsideDielectric = cosThetaI > 0;
 			if (cosThetaI < 0) {
 				eta = etaInv;

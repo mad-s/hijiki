@@ -92,10 +92,9 @@ bool intersectScene(Ray ray, out Intersection its) {
 	its.p = ray.origin + its.t * ray.direction;
 	// TODO: generalize
 	if (its.objectID < numSpheres) {
-		its.n = (its.p - spheres[its.objectID].positionRadius.xyz) / spheres[its.objectID].positionRadius.w;
+		populateSphereIntersection(spheres[its.objectID], its);
 	} else {
-		Quad quad = quads[its.objectID-numSpheres];
-		its.n = normalize(cross(quad.edge1,quad.edge2));
+		populateQuadIntersection(quads[its.objectID-numSpheres], its);
 	}
 
 	return true;

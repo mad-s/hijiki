@@ -11,15 +11,24 @@ bool intersectQuad(Ray ray, Quad quad, inout Intersection its) {
 	float d = 1./dot(ray.direction, n);
 	float u = d*dot(-q, quad.edge2);
 	float v = d*dot( q, quad.edge1);
-	float t = d*dot(-n, ro);
-	if (u < 0. || u > 1. || v < 0. || v > 1.) {
+
+	if (any(bvec4(u<0., u>1., v<0., v>1.))) {
 		return false;
 	}
+	float t = d*dot(-n, ro);
 	if (ray.tMin <= t && t <= ray.tMax) {
 		its.t = t;
+		its.uv = vec2(u,v);
 		return true;
 	}
 	return false;
+}
+
+void populateQuadIntersection(Quad quad, inout Intersection its) {
+	vec3 t = normalize(quad.edge1);
+	vec3 b = normalize(quad.edge2);
+	vec3 n = its.n = cross(t, b);
+	its.frame = mat3(t, b, n);
 }
 
 void sampleQuad(Quad quad, out ShapeQueryRecord sRec) {
