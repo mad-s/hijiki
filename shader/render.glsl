@@ -53,6 +53,7 @@ struct ShapeQueryRecord {
 
 #include "shapes/sphere.glsl"
 #include "shapes/quad.glsl"
+#include "materials/imgtexture.glsl"
 
 #include "scene.glsl"
 
@@ -174,8 +175,10 @@ void main() {
 	vec3 albedo;
 	float depth;
 	vec3 normal;
-	integrateRay(ray, total, albedo, depth, normal);
-
+	//integrateRay(ray, total, albedo, depth, normal);
+        //total = imageLoad(imgTextures, ivec3(0, 0, 0)).xyz; // texture should be filled with 1s
+        total = imageSize(imgTextures).xyz;
+        //total = vec3(1, 0, 0);
 
 	imageStore(outputImage, ivec3(local, 0), vec4(total, 1.));
 	imageStore(outputImage, ivec3(local, 1), vec4(normal, depth));

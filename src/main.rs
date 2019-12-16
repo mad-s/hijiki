@@ -37,6 +37,7 @@ use shape::*;
 #[strum_discriminants(derive(EnumIter,AsRefStr))]
 enum Material {
     Diffuse(DiffuseMaterial),
+    DiffuseTexture(DiffuseTexture),
     Mirror(MirrorMaterial),
     Dielectric(DielectricMaterial),
     Emissive(EmitterMaterial),
@@ -81,6 +82,11 @@ struct CompiledBVHNode {
     exit_index: u32,
 }
 
+#[repr(C, align(16))]
+#[derive(Debug, Clone)]
+struct DiffuseTexture {
+    albedo: Vec<Vec3>
+}
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
@@ -210,6 +216,7 @@ impl Scene {
         let bvh = flat;
 
         let mut diffuse    = vec![];
+        let mut img_textures = vec![];
         let mut dielectric = vec![];
         let mut emitters  = vec![];
 
@@ -231,6 +238,10 @@ impl Scene {
                 Material::Emissive(x) => {
                     emitters.push(x);
                     emitters.len()-1
+                }
+                Material::DiffuseTexture(x) => {
+                    img_textures.push(x);
+                    img_textures.len()-1
                 }
             };
             material_reprs.push(((tag as u32) << MATERIAL_TAG_SHIFT) + ix as u32);
@@ -256,6 +267,7 @@ impl Scene {
             ("diffuse", std::mem::size_of_val(&diffuse[..])),
             ("dielectric", std::mem::size_of_val(&dielectric[..])),
             ("emissive", std::mem::size_of_val(&emitters[..])),
+            ("img_texture", std::mem::size_of_val(&img_textures[..])),
         ].into_iter().scan((0u32,0u64), |&mut (ref mut index, ref mut offset), (name,size)| {
             let size = (size+BUFFER_ALIGNMENT-1)&!(BUFFER_ALIGNMENT-1);
             let size = size as wgpu::BufferAddress;
@@ -309,6 +321,7 @@ struct CompiledScene {
     diffuse: Vec<DiffuseMaterial>,
     dielectric: Vec<DielectricMaterial>,
     emitters: Vec<EmitterMaterial>,
+
 }
 
 
@@ -628,12 +641,15 @@ struct IntegratorPipeline {
     pipeline: wgpu::ComputePipeline,
 }
 
+const INTEGRATOR_BINDING: u32 = 3;
+
 impl IntegratorPipeline {
     fn new(
         gpu: &mut GPU,
         scene: &CompiledScene,
         scene_buffer: &wgpu::Buffer,
         current_block: &wgpu::Buffer,
+        image_textures: &wgpu::TextureView,
         output: &wgpu::TextureView,
         use_bvh: bool,
     ) -> Self {
@@ -641,7 +657,7 @@ impl IntegratorPipeline {
         for binding in &scene.bindings {
             definitions.push((
                     format!("BINDING_{}", binding.name.to_uppercase()),
-                    format!("{}", binding.index+2)
+                    format!("{}", binding.index+INTEGRATOR_BINDING)
                     ));
         }
         definitions.push(("USE_BVH".to_owned(), if use_bvh {"1".to_owned()} else {"0".to_owned()}));
@@ -655,7 +671,6 @@ impl IntegratorPipeline {
         let shader_module = gpu.load_shader_from_file("shader/render.glsl", &definitions.iter().map(|(a,b)| (a.as_ref(), b.as_ref())).collect::<Vec<(&str, &str)>>()[..]);
         let device = &mut gpu.device;
 
-        //let scene_subbuffer_sizes = scene.subbuffer_sizes();
         let mut bindings = vec![
             wgpu::BindGroupLayoutBinding {
                 binding: 0,
@@ -674,10 +689,17 @@ impl IntegratorPipeline {
                     dimension: wgpu::TextureViewDimension::D2Array,
                 },
             },
+            wgpu::BindGroupLayoutBinding {
+                binding: 2,
+                visibility: wgpu::ShaderStage::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    dimension: wgpu::TextureViewDimension::D2Array, // TODO
+                },
+            }
         ];
         for binding in &scene.bindings {
             bindings.push(wgpu::BindGroupLayoutBinding {
-                binding: 2 + binding.index,
+                binding: INTEGRATOR_BINDING + binding.index,
                 visibility: wgpu::ShaderStage::COMPUTE,
                 ty: wgpu::BindingType::StorageBuffer {
                     dynamic: false,
@@ -713,10 +735,14 @@ impl IntegratorPipeline {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(output),
             },
+            wgpu::Binding {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(image_textures), // TODO
+            },
         ];
         for binding in &scene.bindings {
             bindings.push(wgpu::Binding {
-                binding: 2 + binding.index,
+                binding: INTEGRATOR_BINDING + binding.index,
                 resource: wgpu::BindingResource::Buffer {
                     buffer: &scene_buffer,
                     range: binding.offset..binding.offset+binding.size,
@@ -1064,35 +1090,26 @@ impl Renderer {
             usage: wgpu::BufferUsage::STORAGE | wgpu::BufferUsage::COPY_DST,
         });
 
-        let intermediate_texture = device.create_texture(&wgpu::TextureDescriptor {
-            size: wgpu::Extent3d {
-                width: block_size,
-                height: block_size,
-                depth: 1,
-            },
-            array_layer_count: 3,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsage::STORAGE,
-        });
+        fn create_texture(width: u32, height: u32, device: &wgpu::Device, usage: wgpu::TextureUsage, layer_count: u32) -> wgpu::Texture {
+            device.create_texture(&wgpu::TextureDescriptor {
+                size: wgpu::Extent3d {
+                    width: width,
+                    height: height,
+                    depth: 1,
+                },
+                array_layer_count: layer_count,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: usage,
+            })
+        }
 
-        let final_texture = device.create_texture(&wgpu::TextureDescriptor {
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth: 1,
-            },
-            array_layer_count: 1,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsage::STORAGE
-                | wgpu::TextureUsage::COPY_SRC
-                | wgpu::TextureUsage::COPY_DST,
-        });
+        let intermediate_texture = create_texture(block_size, block_size, &device, wgpu::TextureUsage::STORAGE, 1);
+        let image_textures = create_texture(width, height, &device, wgpu::TextureUsage::STORAGE | wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::COPY_DST, 1);
+        let final_texture = create_texture(width, height, &device, wgpu::TextureUsage::STORAGE | wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::COPY_DST, 3);
+
         let row_size = (width + 255) & !255;
         let final_output_buffer = device
             .create_buffer_mapped(
@@ -1103,6 +1120,12 @@ impl Renderer {
             )
             .fill_from_slice(&vec![[0f32; 4]; (row_size * height) as usize]);
 
+        let texture_buffer = device
+            .create_buffer_mapped(
+                (row_size * height) as usize,
+                wgpu::BufferUsage::COPY_SRC | wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::MAP_READ,
+                ).fill_from_slice(&vec![[1f32; 4]; (row_size * height) as usize]);
+
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
         encoder.copy_buffer_to_buffer(
@@ -1112,6 +1135,7 @@ impl Renderer {
             0,
             scene_buffer_size as wgpu::BufferAddress,
         );
+
         encoder.copy_buffer_to_texture(
             wgpu::BufferCopyView {
                 buffer: &final_output_buffer,
@@ -1135,6 +1159,31 @@ impl Renderer {
                 depth: 1,
             },
         );
+
+        encoder.copy_buffer_to_texture(
+            wgpu::BufferCopyView {
+                buffer: &texture_buffer,
+                offset: 0,
+                row_pitch: row_size * std::mem::size_of::<[f32; 4]>() as u32,
+                image_height: height,
+            },
+            wgpu::TextureCopyView {
+                texture: &image_textures,
+                mip_level: 0,
+                array_layer: 0,
+                origin: wgpu::Origin3d {
+                    x: 0.,
+                    y: 0.,
+                    z: 0.,
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth: 1,
+            },
+        );
+
         // TODO: copy other data to gpu?
         gpu.queue.submit(&[encoder.finish()]);
 
@@ -1143,6 +1192,7 @@ impl Renderer {
             &scene,
             &scene_buffer,
             &current_block,
+            &image_textures.create_default_view(),
             &intermediate_texture.create_default_view(),
             use_bvh,
         );

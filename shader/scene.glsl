@@ -25,6 +25,8 @@ layout(set = 0, binding = BINDING_MATERIALS) buffer Materials {
 	uint materials[];
 };
 
+layout(RGBA32F, set=0, binding = BINDING_IMG_TEXTURE) uniform image2DArray imgTextures;
+
 bool intersectScene(Ray ray, out Intersection its);
 bool intersectScene(Ray ray) {
 	// TODO: optimize
