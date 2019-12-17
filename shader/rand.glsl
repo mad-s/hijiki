@@ -39,3 +39,13 @@ vec3 randUniformSphere() {
 	return vec3(r*cos(theta), r*sin(theta), z);
 }
 
+vec3 randBarycentric() {
+	float u = randUniformFloat();
+	float v = randUniformFloat();
+	if (u+v > 1) {
+		u = 1-v;
+		v = 1-u;
+	}
+	return vec3(u,v,1-u-v);
+}
+

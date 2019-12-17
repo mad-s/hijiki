@@ -2,6 +2,9 @@ layout(set = 0, binding = BINDING_SCENE) buffer SceneBufferInfo {
 	Camera camera;
 	int numSpheres;
 	int numQuads;
+	int numTriangles;
+
+	int numEmitters;
 };
 
 struct BVHNode {
@@ -21,9 +24,82 @@ layout(set = 0, binding = BINDING_QUADS) buffer Quads {
 	Quad quads[];
 };
 
+layout(set = 0, binding = BINDING_TRIANGLES) buffer Triangles {
+	uint triangles[];
+};
+
+
+layout(set = 0, binding = BINDING_VERTICES) buffer Vertices {
+	Vertex vertices[];
+};
+
 layout(set = 0, binding = BINDING_MATERIALS) buffer Materials {
 	uint materials[];
 };
+
+struct Emitter {
+	uint shape;
+	float pdf;
+	float cdf;
+	float pad;
+};
+
+layout(set = 0, binding = BINDING_EMITTERS) buffer Emitters {
+	Emitter emitters[];
+};
+
+void sampleShape(uint shape, out ShapeQueryRecord sRec) {
+	if (shape < numSpheres) {
+		sampleSphere(spheres[shape], sRec);
+	} else if (shape < numSpheres+numQuads) {
+		sampleQuad(quads[shape-numSpheres], sRec);
+	} else {
+		uint ix = shape - numSpheres - numQuads;
+		sampleTriangle(
+			vertices[triangles[3*ix+0]],
+			vertices[triangles[3*ix+1]],
+			vertices[triangles[3*ix+2]],
+			sRec
+		);
+	}
+}
+
+vec3 sampleEmitter(vec3 ref, out Ray shadowRay) {
+	float emitterSample = randUniformFloat();
+	int emitter = 0;
+	// TODO: binary search
+	for (int i = 0; i < numEmitters; i++) {
+		emitterSample -= emitters[i].pdf;
+		if (emitterSample < 0) {
+			emitter = i;
+			break;
+		}
+	}
+	ShapeQueryRecord sRec;
+	sampleShape(emitters[emitter].shape, sRec);
+
+	uint mat = materials[emitters[emitter].shape];
+	vec3 power = emissiveMaterials[mat & ((1<<MATERIAL_TAG_SHIFT)-1)].power;
+
+	vec3 dir = sRec.p - ref;
+	float dist = length(dir);
+	dir /= dist;
+
+	shadowRay.origin = ref;
+	shadowRay.direction = dir;
+	shadowRay.tMin = 2.*M_EPS;
+	shadowRay.tMax = dist-M_EPS;
+
+	float cosTheta = -dot(dir, sRec.n);
+	if (cosTheta < 0) {
+		return vec3(0.);
+	}
+
+	float pdf = emitters[emitter].pdf * sRec.pdf * dist*dist / cosTheta;
+
+	return power / pdf;
+
+}
 
 bool intersectScene(Ray ray, out Intersection its);
 bool intersectScene(Ray ray) {
@@ -43,8 +119,15 @@ bool intersectScene(Ray ray, out Intersection its) {
 			bool hasIntersection;
 			if (shapeIndex < numSpheres) {
 				hasIntersection = intersectSphere(ray, spheres[shapeIndex], its);
-			} else {
+			} else if (shapeIndex < numSpheres + numQuads) {
 				hasIntersection = intersectQuad(ray, quads[shapeIndex-numSpheres], its);
+			} else {
+				uint ix = shapeIndex - numSpheres - numQuads;
+				hasIntersection = intersectTriangle(ray,
+						vertices[triangles[3*ix+0]],
+						vertices[triangles[3*ix+1]],
+						vertices[triangles[3*ix+2]],
+						its);
 			}
 			if (hasIntersection) {
 				ray.tMax = its.t - M_EPS;
@@ -83,6 +166,16 @@ bool intersectScene(Ray ray, out Intersection its) {
 			its.objectID = numSpheres + i;
 		}
 	}
+	for (int i = 0; i < numTriangles; i++) {
+		if (intersectTriangle(ray, 
+				vertices[triangles[3*i+0]],
+				vertices[triangles[3*i+1]],
+				vertices[triangles[3*i+2]],
+			its)) {
+			ray.tMax = its.t - M_EPS;
+			its.objectID = numSpheres + numQuads + i;
+		}
+	}
 #endif
 	
 	if (its.objectID == -1) {
@@ -93,8 +186,18 @@ bool intersectScene(Ray ray, out Intersection its) {
 	// TODO: generalize
 	if (its.objectID < numSpheres) {
 		populateSphereIntersection(spheres[its.objectID], its);
-	} else {
+	} else if (its.objectID < numSpheres + numQuads) {
 		populateQuadIntersection(quads[its.objectID-numSpheres], its);
+	} else {
+		vec3 t,b;
+		if (abs(its.n.x) > abs(its.n.y)) {
+			b = vec3(0.,1.,0.);
+		} else {
+			b = vec3(1.,0.,0.);
+		}
+		t = normalize(cross(its.n, b));
+		b = cross(its.n, t);
+		its.frame = mat3(t, b, its.n);
 	}
 
 	return true;

@@ -43,27 +43,43 @@ enum Material {
 }
 const MATERIAL_TAG_SHIFT : u32 = 24; // top 8 bits are tag
 
-#[derive(Debug)]
+#[derive(Debug,Clone,Copy)]
 enum Shape {
     Sphere(Sphere),
     Quad(Quad),
+    Triangle([u32;3]),
+}
+
+#[derive(Debug,Clone,Copy)]
+struct Vertex {
+    pos: Point3<f32>,
+    u: f32,
+    normal: Vector3<f32>,
+    v: f32,
 }
 
 
-struct BVHShape {
+struct BVHShape<'a> {
+    scene: &'a Scene,
     shape: Shape,
     node_index: usize,
 }
 
-impl bvh::aabb::Bounded for BVHShape {
+impl<'a> bvh::aabb::Bounded for BVHShape<'a> {
     fn aabb(&self) -> AABB {
         match self.shape {
             Shape::Sphere(sphere) => sphere.aabb(),
             Shape::Quad(quad)     => quad.aabb(),
+            Shape::Triangle([a,b,c])  => {
+                AABB::empty()
+                    .grow(&self.scene.vertices[a as usize].pos)
+                    .grow(&self.scene.vertices[b as usize].pos)
+                    .grow(&self.scene.vertices[c as usize].pos)
+            }
         }
     }
 }
-impl bvh::bounding_hierarchy::BHShape for BVHShape {
+impl<'a> bvh::bounding_hierarchy::BHShape for BVHShape<'a> {
     fn set_bh_node_index(&mut self, index: usize) {
         self.node_index = index;
     }
@@ -91,7 +107,6 @@ struct DiffuseMaterial {
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 struct MirrorMaterial {
-    //dummy: u8,
 }
 
 #[repr(C, align(16))]
@@ -139,6 +154,7 @@ struct Scene {
     camera: Camera,
 
     objects: Vec<(Shape, usize)>,
+    vertices: Vec<Vertex>,
 
     materials: Vec<Material>,
 }
@@ -147,25 +163,30 @@ impl Scene {
     fn compile(self) -> CompiledScene {
         let mut spheres = vec![];
         let mut quads   = vec![];
+        let mut triangles = vec![];
         let mut bvh_shapes = vec![];
         let mut shape_indices = vec![];
 
-        for (shape, material) in self.objects.into_iter() {
+        for (shape, material) in self.objects.iter() {
             match shape {
                 Shape::Sphere(sphere) => {
                     shape_indices.push(spheres.len());
-                    spheres.push((sphere, material))
+                    spheres.push((sphere, *material))
                 },
                 Shape::Quad(quad)     => {
                     shape_indices.push(quads.len());
-                    quads.push((quad,   material))
+                    quads.push((quad,   *material))
+                },
+                Shape::Triangle(tri)     => {
+                    shape_indices.push(triangles.len());
+                    triangles.push((tri,   *material))
                 },
             }
-            bvh_shapes.push(BVHShape{shape, node_index: 0});
+            bvh_shapes.push(BVHShape{shape: *shape, node_index: 0, scene: &self});
         }
 
         let bvh = bvh::bvh::BVH::build(&mut bvh_shapes[..]);
-        bvh.pretty_print();
+        //bvh.pretty_print();
 
         let mut indices = vec![usize::max_value(); bvh.nodes.len()];
         fn calculate_indices(current: usize, nodes: &[bvh::bvh::BVHNode], indices: &mut [usize], current_index: &mut usize) {
@@ -204,6 +225,7 @@ impl Scene {
             let offset = match bvh_shapes[node.shape_index as usize].shape {
                 Shape::Sphere(_) => 0,
                 Shape::Quad(_) => spheres.len(),
+                Shape::Triangle(_) => spheres.len() + quads.len(),
             };
             node.shape_index = (shape_indices[node.shape_index as usize] + offset) as u32;
         }
@@ -211,7 +233,7 @@ impl Scene {
 
         let mut diffuse    = vec![];
         let mut dielectric = vec![];
-        let mut emitters  = vec![];
+        let mut emissive   = vec![];
 
         let mut material_reprs : Vec<u32> = vec![];
         for mat in self.materials.into_iter() {
@@ -229,8 +251,8 @@ impl Scene {
                     dielectric.len()-1
                 },
                 Material::Emissive(x) => {
-                    emitters.push(x);
-                    emitters.len()-1
+                    emissive.push(x);
+                    emissive.len()-1
                 }
             };
             material_reprs.push(((tag as u32) << MATERIAL_TAG_SHIFT) + ix as u32);
@@ -243,19 +265,47 @@ impl Scene {
         for &(_, mat) in &quads {
             materials.push(material_reprs[mat]);
         }
+        for &(_, mat) in &triangles {
+            materials.push(material_reprs[mat]);
+        }
 
-        let spheres = spheres.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
-        let quads   =   quads.into_iter().map(|(x,_)| x).collect::<Vec<_>>();
+        let mut emitters = vec![];
+        for (ix, mat) in materials.iter().enumerate() {
+            if mat >> MATERIAL_TAG_SHIFT == MaterialType::Emissive as u8 as u32 {
+                emitters.push(Emitter {
+                    shape: ix as u32,
+                    pdf: 0.,
+                    cdf: 0.,
+                    pad: 0.,
+                })
+            }
+        };
+        let num_emitters = emitters.len();
+        let emitter_pdf = 1.0 / num_emitters as f32;
+        let mut cdf = 0.;
+        for emitter in &mut emitters {
+            cdf += emitter_pdf;
+            emitter.pdf = emitter_pdf;
+            emitter.cdf = cdf;
+        }
+
+        let spheres = spheres.into_iter().map(|(x,_)| *x).collect::<Vec<_>>();
+        let quads = quads.into_iter().map(|(x,_)| *x).collect::<Vec<_>>();
+        let triangles = triangles.into_iter().map(|(x,_)| *x).collect::<Vec<_>>();
+        let vertices = self.vertices;
 
         let bindings = [
             ("scene", std::mem::size_of::<SceneBufferInfo>()),
             ("bvh", std::mem::size_of_val(&bvh[..])),
             ("spheres", std::mem::size_of_val(&spheres[..])),
             ("quads", std::mem::size_of_val(&quads[..])),
+            ("triangles", std::mem::size_of_val(&triangles[..])),
+            ("vertices", std::mem::size_of_val(&vertices[..])),
             ("materials", std::mem::size_of_val(&materials[..])),
+            ("emitters", std::mem::size_of_val(&emitters[..])),
             ("diffuse", std::mem::size_of_val(&diffuse[..])),
             ("dielectric", std::mem::size_of_val(&dielectric[..])),
-            ("emissive", std::mem::size_of_val(&emitters[..])),
+            ("emissive", std::mem::size_of_val(&emissive[..])),
         ].into_iter().scan((0u32,0u64), |&mut (ref mut index, ref mut offset), (name,size)| {
             let size = (size+BUFFER_ALIGNMENT-1)&!(BUFFER_ALIGNMENT-1);
             let size = size as wgpu::BufferAddress;
@@ -276,11 +326,14 @@ impl Scene {
             bindings,
             spheres,
             quads,
+            triangles,
+            vertices,
             bvh,
             materials,
+            emitters,
             diffuse,
             dielectric,
-            emitters,
+            emissive,
         }
     }
 }
@@ -293,6 +346,14 @@ struct BindingInfo {
     size: wgpu::BufferAddress,
 }
 
+#[derive(Debug,Copy,Clone)]
+struct Emitter {
+    shape: u32,
+    pdf: f32,
+    cdf: f32,
+    pad: f32,
+}
+
 #[derive(Debug)]
 struct CompiledScene {
     camera: Camera,
@@ -303,12 +364,16 @@ struct CompiledScene {
 
     spheres: Vec<Sphere>,
     quads: Vec<Quad>,
+    triangles: Vec<[u32; 3]>, // flattened repr
+    vertices: Vec<Vertex>,
 
     materials: Vec<u32>,
 
+    emitters: Vec<Emitter>,
+
     diffuse: Vec<DiffuseMaterial>,
     dielectric: Vec<DielectricMaterial>,
-    emitters: Vec<EmitterMaterial>,
+    emissive: Vec<EmitterMaterial>,
 }
 
 
@@ -318,6 +383,8 @@ struct SceneBufferInfo {
     camera: Camera,
     num_spheres: u32,
     num_quads: u32,
+    num_triangles: u32,
+    num_emitters: u32,
 }
 
 
@@ -327,7 +394,7 @@ impl Scene {
     fn from_obj<P: AsRef<std::path::Path>>(file: P) -> Self {
         let (models, materials) = tobj::load_obj(file.as_ref()).unwrap();
 
-        let angle = -1.5f32.to_radians(); // look down a bit
+        let angle = -1.45f32.to_radians(); // look down a bit
         let rotation = vec4((0.5*angle).sin(), 0., 0., (0.5*angle).cos());
 
         let mut scene = Scene {
@@ -338,7 +405,9 @@ impl Scene {
             },
             objects: vec![],
             materials: vec![],
+            vertices: vec![],
         };
+
 
         for material in materials.iter() {
             if material.name.starts_with("light") {
@@ -346,6 +415,10 @@ impl Scene {
                 scene.materials.push(Material::Emissive(EmitterMaterial {
                     power: vec3(power[0], power[1], power[2]),
                 }));
+            } else if material.name.starts_with("glass") {
+                scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
+            } else if material.name.starts_with("mirror") {
+                scene.materials.push(Material::Mirror(MirrorMaterial{}));
             } else {
                 scene.materials.push(Material::Diffuse(DiffuseMaterial {
                     color: Vec3::from_array(material.diffuse),
@@ -354,7 +427,20 @@ impl Scene {
         }
 
         for model in models.iter() {
+            let vertex_offset = scene.vertices.len() as u32;
+
             let mesh = &model.mesh;
+
+            for (i, pos) in mesh.positions.chunks(3).enumerate() {
+                let uv = mesh.texcoords.get(2*i..2*(i+1)).unwrap_or(&[0., 0.]);
+                let normal = mesh.normals.get(3*i..3*(i+1)).unwrap();
+                scene.vertices.push(Vertex {
+                    pos: Point3::new(pos[0], pos[1], pos[2]),
+                    u: uv[0],
+                    normal: Vector3::new(normal[0], normal[1], normal[2]),
+                    v: uv[1],
+                });
+            }
 
             let material = match mesh.material_id {
                 Some(x) => x,
@@ -364,6 +450,12 @@ impl Scene {
             let mut last = [0,0,0];
             for tri in mesh.indices.chunks(3) {
                 let tri = [tri[0], tri[1], tri[2]];
+                //scene.objects.push((Shape::Triangle([
+                //    tri[0] + vertex_offset,
+                //    tri[1] + vertex_offset,
+                //    tri[2] + vertex_offset,
+                //]), material));
+                //continue;
 
                 if tri[0] == last[0] && tri[1] == last[2] { // recover triangulated quads
                     let a = last[0] as usize;
@@ -399,7 +491,6 @@ impl Scene {
                         )), material));
                     }
                 }
-
                 last = tri;
             }
         }
@@ -438,7 +529,7 @@ impl CompiledScene {
 
     fn write_to_buffer(&self, mut buffer: &mut [u8]) {
         assert_eq!(
-            self.spheres.len() + self.quads.len(),
+            self.spheres.len() + self.quads.len() + self.triangles.len(),
             self.materials.len()
         );
 
@@ -446,6 +537,8 @@ impl CompiledScene {
             camera: self.camera,
             num_spheres: self.spheres.len() as u32,
             num_quads: self.quads.len() as u32,
+            num_triangles: self.triangles.len() as u32,
+            num_emitters: self.emitters.len() as u32,
         };
 
         unsafe fn put<T: Copy>(buffer: &mut &mut [u8], data: &[T]) {
@@ -463,12 +556,16 @@ impl CompiledScene {
             put(&mut buffer, &self.bvh[..]);
             put(&mut buffer, &self.spheres[..]);
             put(&mut buffer, &self.quads[..]);
+            put(&mut buffer, &self.triangles[..]);
+            put(&mut buffer, &self.vertices[..]);
             put(&mut buffer, &self.materials[..]);
+
+            put(&mut buffer, &self.emitters[..]);
 
             put(&mut buffer, &self.diffuse[..]);
             //put(&mut buffer, &self.mirrors[..]);
             put(&mut buffer, &self.dielectric[..]);
-            put(&mut buffer, &self.emitters[..]);
+            put(&mut buffer, &self.emissive[..]);
             //put(&mut buffer, &self.portals[..]);
         }
 
@@ -652,6 +749,7 @@ impl IntegratorPipeline {
                     format!("{}", material_type as u8),
                     ));
         }
+        println!("{:#?}", definitions);
         let shader_module = gpu.load_shader_from_file("shader/render.glsl", &definitions.iter().map(|(a,b)| (a.as_ref(), b.as_ref())).collect::<Vec<(&str, &str)>>()[..]);
         let device = &mut gpu.device;
 
@@ -1332,8 +1430,8 @@ fn main() {
     let mut scene = Scene::from_obj(opt.scene);
     if opt.put_cbox_spheres {
         scene.materials.push(Material::Mirror(MirrorMaterial{}));
-        //scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
-        scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(1., 0., 1.), 1.5)));
+        scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
+        //scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(1., 0., 1.), 1.5)));
         scene.objects.push((Shape::Sphere(Sphere {
                     // mirror sphere
                     position: Point3::new(-0.421400, 0.332100, -0.280000),

@@ -51,10 +51,6 @@ struct ShapeQueryRecord {
 	float pdf;
 };
 
-#include "shapes/sphere.glsl"
-#include "shapes/quad.glsl"
-
-#include "scene.glsl"
 
 #include "materials/diffuse.glsl"
 #include "materials/mirror.glsl"
@@ -64,7 +60,14 @@ struct ShapeQueryRecord {
 
 #include "material.glsl"
 
+#include "shapes/sphere.glsl"
+#include "shapes/quad.glsl"
+#include "shapes/triangle.glsl"
+
+#include "scene.glsl"
+
 #include "block.glsl"
+
 
 
 layout(set = 0, binding = 0) buffer CurrentImageBlock {
@@ -90,6 +93,8 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		if (!intersectScene(ray, its)) {
 			return;
 		}
+		//total = vec3(its.objectID);
+		//return;
 
 		if (bounce == 0) {
 			depth  = its.t;
@@ -108,6 +113,14 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		}
 		if (material_tag == MATERIAL_TAG_DIFFUSE) {
 			ShapeQueryRecord sRec;
+			Ray shadowRay;
+			vec3 importance = sampleEmitter(its.p, shadowRay);
+			if (length(importance) > M_EPS && dot(shadowRay.direction, its.n) > 0) {
+				if (!intersectScene(shadowRay)) {
+					total += throughput * evalBSDF(mat, shadowRay.direction, its, -ray.direction) * importance;
+				}
+			}
+			/*
 			sampleQuad(quads[2], sRec);
 
 			vec3 toLight = sRec.p - its.p;
@@ -130,6 +143,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 					}
 				}
 			}
+			*/
 		}
 
 		
