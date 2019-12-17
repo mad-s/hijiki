@@ -10,6 +10,10 @@ layout(set = 0, binding = BINDING_EMISSIVE) buffer EmissiveMaterials {
 	 EmissiveMaterial emissiveMaterials[];
 };
 
+layout(set = 0, binding = BINDING_TEXTURES) buffer TexturedMaterials {
+	 TexturedMaterial texturedMaterials[];
+};
+
 
 vec3 evalBSDF(uint material, vec3 wi, Intersection its, vec3 wo) {
 	uint tag = material >> MATERIAL_TAG_SHIFT;
@@ -26,13 +30,20 @@ vec3 evalBSDF(uint material, vec3 wi, Intersection its, vec3 wo) {
 vec3 sampleBSDF(uint material, vec3 wi, Intersection its, out vec3 wo, inout vec3 extinction) {
 	uint tag = material >> MATERIAL_TAG_SHIFT;
 	uint idx = material & ((1 << MATERIAL_TAG_SHIFT)-1);
+        vec3 wo_local;
 	switch(tag) {
 		case MATERIAL_TAG_DIFFUSE:
-			vec3 wo_local = randCosHemisphere();
+			wo_local = randCosHemisphere();
 			//vec4 localToWorld = quaternionFromTo(vec3(0.,0.,1), n);
 			//wo = quaternionRotate(wo_local, localToWorld);
 			wo = its.frame * wo_local;
 			return diffuseMaterials[idx].color;
+                case MATERIAL_TAG_TEXTURE:
+                        wo_local = randCosHemisphere();
+                        wo = its.frame * wo_local;
+                        //TODO: unhardcode height/width
+                        uint textureIndex = texturedMaterials[idx].index;
+                        return imageLoad(imgTextures, ivec3(its.uv * 512, textureIndex)).xyz;
 		case MATERIAL_TAG_MIRROR:
 			wo = reflect(wi, its.n);
 			return vec3(1.);
@@ -76,5 +87,6 @@ vec3 sampleBSDF(uint material, vec3 wi, Intersection its, out vec3 wo, inout vec
 			return vec3(1.);
 		case MATERIAL_TAG_EMISSIVE:
 			return vec3(0.);
+
 	}
 }

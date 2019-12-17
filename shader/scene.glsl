@@ -25,7 +25,9 @@ layout(set = 0, binding = BINDING_MATERIALS) buffer Materials {
 	uint materials[];
 };
 
-layout(RGBA32F, set=0, binding = BINDING_IMG_TEXTURE) uniform image2DArray imgTextures;
+layout(RGBA32F, set=0, binding = BINDING_TEXTURE_IMAGES) uniform image2DArray imgTextures;
+
+layout(RGBA32F, set=0, binding = BINDING_ENVMAP) uniform image2DArray envmap;
 
 bool intersectScene(Ray ray, out Intersection its);
 bool intersectScene(Ray ray) {
@@ -33,6 +35,12 @@ bool intersectScene(Ray ray) {
 	Intersection dummy;
 	return intersectScene(ray, dummy);
 }
+
+vec3 sampleEnvmap(Ray ray) {
+        ivec2 size = imageSize(envmap).xy;
+        return imageLoad(envmap, ivec3(sphericalToUvCoords(toSphericalCoords(ray.direction)) * size, 0)).xyz;
+}
+
 bool intersectScene(Ray ray, out Intersection its) {
 	its.objectID = -1;
 #if USE_BVH == 1

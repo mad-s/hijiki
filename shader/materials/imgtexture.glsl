@@ -1,0 +1,3 @@
+struct TexturedMaterial {
+        uint index;
+};

@@ -89,7 +89,12 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 	for (int bounce = 0; bounce < 1000; bounce++) {
 
 		if (!intersectScene(ray, its)) {
+#if HAS_ENVMAP == 0
 			return;
+#else
+                        total += throughput * sampleEnvmap(ray);
+                        return;
+#endif
 		}
 
 		if (bounce == 0) {
@@ -175,10 +180,7 @@ void main() {
 	vec3 albedo;
 	float depth;
 	vec3 normal;
-	//integrateRay(ray, total, albedo, depth, normal);
-        //total = imageLoad(imgTextures, ivec3(0, 0, 0)).xyz; // texture should be filled with 1s
-        total = imageSize(imgTextures).xyz;
-        //total = vec3(1, 0, 0);
+	integrateRay(ray, total, albedo, depth, normal);
 
 	imageStore(outputImage, ivec3(local, 0), vec4(total, 1.));
 	imageStore(outputImage, ivec3(local, 1), vec4(normal, depth));
