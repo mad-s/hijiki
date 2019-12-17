@@ -52,7 +52,11 @@ void main() {
 			vec3 normalOffset = normal_depth.xyz - normalCenter;
 			vec3 albedoOffset = albedo.rgb       - albedoCenter;
 			weight *= exp(-(dot(normalOffset, normalOffset)*2+dot(albedoOffset,albedoOffset)));
-			outputValue += weight * color_weight;
+			vec4 weighted = weight * color_weight;
+			if (any(isnan(weighted))) {
+				continue;
+			}
+			outputValue += weighted;
 		}
 	}
 
