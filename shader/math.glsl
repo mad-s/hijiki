@@ -2,8 +2,8 @@
 #define M_EPS 1e-4
 
 vec2 toSphericalCoords(vec3 direction) {
-        float phi = acos(direction.z / direction.x);
-        float theta = atan(direction.y, direction.x) + M_PI / 2;
+        float theta = acos(direction.y);
+        float phi = atan(direction.z, direction.x) + M_PI;
         return vec2(phi, theta);
 }
 

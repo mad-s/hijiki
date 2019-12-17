@@ -421,7 +421,7 @@ impl Scene {
                 rotation,
                 fov: 27.7,
             },
-            texture_filenames: vec!["textures/envmap.exr".to_owned(), "textures/wood_thingy.exr".to_owned()],
+            texture_filenames: vec!["textures/road_envmap.exr".to_owned(), "textures/wood_thingy.exr".to_owned()],
             has_envmap: true,
             objects: vec![],
             materials: vec![],
