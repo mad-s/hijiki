@@ -21,6 +21,12 @@ impl Bounded for Sphere {
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
+pub struct Portal {
+    quads: [Quad; 2],
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
 pub struct Quad {
     pub origin: Point3<f32>,
     pad1: f32,

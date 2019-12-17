@@ -51,19 +51,19 @@ struct ShapeQueryRecord {
 	float pdf;
 };
 
-
 #include "materials/diffuse.glsl"
 #include "materials/mirror.glsl"
 #include "materials/dielectric.glsl"
 #include "materials/emissive.glsl"
 #include "materials/portal.glsl"
+#include "materials/imgtexture.glsl"
 
-#include "material.glsl"
 
 #include "shapes/sphere.glsl"
 #include "shapes/quad.glsl"
 #include "shapes/triangle.glsl"
 
+#include "material.glsl"
 #include "scene.glsl"
 
 #include "block.glsl"
@@ -91,7 +91,12 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 	for (int bounce = 0; bounce < 1000; bounce++) {
 
 		if (!intersectScene(ray, its)) {
+#if HAS_ENVMAP == 0
 			return;
+#else
+                        total += throughput * evalEnvmap(ray);
+                        return;
+#endif
 		}
 		//total = vec3(its.objectID);
 		//return;
@@ -114,7 +119,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		if (material_tag == MATERIAL_TAG_DIFFUSE) {
 			ShapeQueryRecord sRec;
 			Ray shadowRay;
-			vec3 importance = sampleEmitter(its.p, shadowRay);
+			vec3 importance = sampleEmitters(its.p, shadowRay);
 			if (length(importance) > M_EPS && dot(shadowRay.direction, its.n) > 0) {
 				if (!intersectScene(shadowRay)) {
 					total += throughput * evalBSDF(mat, shadowRay.direction, its, -ray.direction) * importance;
@@ -189,7 +194,6 @@ void main() {
 	float depth;
 	vec3 normal;
 	integrateRay(ray, total, albedo, depth, normal);
-
 
 	imageStore(outputImage, ivec3(local, 0), vec4(total, 1.));
 	imageStore(outputImage, ivec3(local, 1), vec4(normal, depth));

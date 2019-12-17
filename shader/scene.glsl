@@ -7,6 +7,14 @@ layout(set = 0, binding = BINDING_SCENE) buffer SceneBufferInfo {
 	int numEmitters;
 };
 
+layout(RGBA32F, set=0, binding = BINDING_ENVMAP) uniform image2DArray envmap;
+
+layout(RGBA32F, set=0, binding = BINDING_ENVMAP_BW) uniform image2DArray envmapBW;
+
+layout(RGBA32F, set=0, binding = BINDING_ENVMAP_CDF) uniform image2DArray envmapCDF;
+
+layout(RGBA32F, set=0, binding = BINDING_ENVMAP_CDF2) uniform image2DArray envmapCDF2;
+
 struct BVHNode {
 	vec4 aabbMinShapeIndex;
 	vec4 aabbMaxExitIndex;
@@ -38,7 +46,7 @@ layout(set = 0, binding = BINDING_MATERIALS) buffer Materials {
 };
 
 struct Emitter {
-	uint shape;
+	int shape;
 	float pdf;
 	float cdf;
 	float pad;
@@ -64,20 +72,10 @@ void sampleShape(uint shape, out ShapeQueryRecord sRec) {
 	}
 }
 
-vec3 sampleEmitter(vec3 ref, out Ray shadowRay) {
-	float emitterSample = randUniformFloat();
-	int emitter = 0;
-	// TODO: binary search
-	for (int i = 0; i < numEmitters; i++) {
-		emitterSample -= emitters[i].pdf;
-		if (emitterSample < 0) {
-			emitter = i;
-			break;
-		}
-	}
+
+vec3 sampleEmitter(int emitter, vec3 ref, out Ray shadowRay) {
 	ShapeQueryRecord sRec;
 	sampleShape(emitters[emitter].shape, sRec);
-
 	uint mat = materials[emitters[emitter].shape];
 	vec3 power = emissiveMaterials[mat & ((1<<MATERIAL_TAG_SHIFT)-1)].power;
 
@@ -98,6 +96,71 @@ vec3 sampleEmitter(vec3 ref, out Ray shadowRay) {
 	float pdf = emitters[emitter].pdf * sRec.pdf * dist*dist / cosTheta;
 
 	return power / pdf;
+}
+
+vec3 sampleEnvmap(vec3 ref, out Ray shadowRay) {
+	float cdfSampleY = randUniformFloat();
+        // search over envmap cdf intensity
+        ivec2 size = imageSize(envmap).xy;
+        uint v;
+	for (int i = 0; i < size.y; i++) {
+                float cdf = imageLoad(envmapCDF2, ivec3(i, 1, 1)).x;
+		if (cdfSampleY < cdf) {
+			v = i;
+			break;
+		}
+	}
+        float pdfTheta = imageLoad(envmapCDF2, ivec3(v, 1, 1)).x;
+        float cdfSampleX = randUniformFloat();
+        uint u;
+	for (int i = 0; i < size.x; i++) {
+                float cdf = imageLoad(envmapCDF, ivec3(i, v, 1)).x;
+		if (cdfSampleX < cdf) {
+			u = i;
+			break;
+		}
+	}
+        // got uv, now sample
+        float pdfJoint = imageLoad(envmapBW, ivec3(u, v, 1)).x;
+        float phi = u * 2 * M_PI;
+        float theta = v * M_PI;
+        vec3 coords = toCartesianCoords(uvToSphericalCoords(vec2(u, v)));
+
+	shadowRay.origin = ref;
+	shadowRay.direction = normalize(coords);
+	shadowRay.tMin = 2. * M_EPS;
+        float inf = 1.0 / 0.0;
+	shadowRay.tMax = inf;
+
+        float sinTheta = sin(coords.y);
+
+        float pdf = pdfJoint / pdfTheta;
+        pdf *= emitters[0].pdf / sinTheta;
+        return imageLoad(envmap, ivec3(u, v, 1)).xyz / pdf;
+}
+
+vec3 sampleEmitters(vec3 ref, out Ray shadowRay) {
+	float emitterSample = randUniformFloat();
+	int emitter = 0;
+	// TODO: binary search
+	for (int i = 0; i < numEmitters; i++) {
+		emitterSample -= emitters[i].pdf;
+		if (emitterSample < 0) {
+			emitter = i;
+			break;
+		}
+	}
+
+#if HAS_ENVMAP == 1
+        if (emitter == 0) { // sample the envmap
+               return sampleEnvmap(ref, shadowRay);
+        } else {
+               return sampleEmitter(emitter-1, ref, shadowRay);
+        }
+#else
+        return sampleEmitter(emitter, ref, shadowRay);
+#endif
+
 
 }
 
@@ -107,6 +170,13 @@ bool intersectScene(Ray ray) {
 	Intersection dummy;
 	return intersectScene(ray, dummy);
 }
+
+
+vec3 evalEnvmap(Ray ray) {
+        ivec2 size = imageSize(envmap).xy;
+        return imageLoad(envmap, ivec3(sphericalToUvCoords(toSphericalCoords(ray.direction)) * size, 0)).xyz;
+}
+
 bool intersectScene(Ray ray, out Intersection its) {
 	its.objectID = -1;
 #if USE_BVH == 1

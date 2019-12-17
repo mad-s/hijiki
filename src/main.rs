@@ -13,6 +13,7 @@ use bvh::aabb::Bounded;
 use bvh::aabb::AABB;
 use bvh::nalgebra::Vector3;
 use bvh::nalgebra::Point3;
+use bvh::nalgebra::Matrix3;
 
 use std::borrow::Borrow;
 
@@ -37,9 +38,11 @@ use shape::*;
 #[strum_discriminants(derive(EnumIter,AsRefStr))]
 enum Material {
     Diffuse(DiffuseMaterial),
+    Texture(TextureMaterial),
     Mirror(MirrorMaterial),
     Dielectric(DielectricMaterial),
     Emissive(EmitterMaterial),
+    Portal(PortalMaterial),
 }
 const MATERIAL_TAG_SHIFT : u32 = 24; // top 8 bits are tag
 
@@ -97,6 +100,19 @@ struct CompiledBVHNode {
     exit_index: u32,
 }
 
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct TextureMaterial {
+    texture_index: usize,
+}
+
+impl TextureMaterial {
+    fn new(texture_index: usize) -> Self {
+        TextureMaterial {
+            texture_index,
+        }
+    }
+}
 
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
@@ -138,7 +154,49 @@ struct EmitterMaterial {
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy)]
 struct PortalMaterial {
-    transform: Mat4,
+    transform_from: Mat4,
+    transform_to: Mat4,
+    origin_from: Vec3,
+    pad: f32,
+    origin_to: Vec3,
+}
+
+impl PortalMaterial {
+    fn new(from: Quad, to: Quad) -> Self {
+        let onb1 = Self::onb(from.edge1, from.edge2);
+        let onb2 = Self::onb(to.edge1, to.edge2);
+        let transform_from = Mat4 {
+            data: [ onb1[(0, 0)], onb1[(0, 1)], onb1[(0, 2)], 0.,
+                    onb1[(1, 0)], onb1[(1, 1)], onb1[(1, 2)], 0.,
+                    onb1[(2, 0)], onb1[(2, 1)], onb1[(2, 2)], 0.,
+                    0., 0., 0., 1.]
+        };
+        let transform_to = Mat4 {
+            data: [ onb2[(0, 0)], onb2[(0, 1)], onb2[(0, 2)], 0.,
+                    onb2[(1, 0)], onb2[(1, 1)], onb2[(1, 2)], 0.,
+                    onb2[(2, 0)], onb2[(2, 1)], onb2[(2, 2)], 0.,
+                    0., 0., 0., 1.]
+        };
+        let origin_from = Vec3 {x: from.origin.x, y: from.origin.y, z: from.origin.z };
+        let origin_to = Vec3 {x: to.origin.x, y: to.origin.y, z: to.origin.z };
+        PortalMaterial {
+            transform_from,
+            transform_to,
+            origin_from,
+            pad: 0.,
+            origin_to,
+        }
+    }
+
+    fn onb(x: Vector3<f32>, y: Vector3<f32>) -> Matrix3<f32> {
+        let mut y1 = y;
+        let mut z = x.cross(&y1);
+        let mut y = z.cross(&x);
+        let x = x.normalize();
+        y = y.normalize();
+        z = z.normalize();
+        Matrix3::from_columns(&[x, y, z])
+    }
 }
 
 #[repr(C, align(16))]
@@ -157,15 +215,80 @@ struct Scene {
     vertices: Vec<Vertex>,
 
     materials: Vec<Material>,
+    texture_filenames: Vec<String>, // TODO
+    has_envmap: bool,
+}
+
+#[derive(Debug, Clone)]
+#[repr(C)]
+struct TextureImage {
+    pixels: Vec<[f32; 4]>,
+    width: u32,
+    height: u32,
 }
 
 impl Scene {
+    fn load_exr(filename: &str) -> TextureImage {
+
+        // Open the EXR file.
+        let mut file = std::fs::File::open(filename).unwrap();
+        let mut input_file = openexr::InputFile::new(&mut file).unwrap();
+
+        // Get the image dimensions, so we know how large of a buffer to make.
+        let (width, height) = input_file.header().data_dimensions();
+
+        // Buffer to read pixel data into.
+        let mut pixel_data = vec![[0.;4]; (width*height) as usize];
+
+        // New scope because `FrameBufferMut` mutably borrows `pixel_data`, so we
+        // need it to go out of scope before we can access our `pixel_data` again.
+        {
+            // Get the input file data origin, which we need to properly construct the `FrameBufferMut`.
+            let (origin_x, origin_y) = input_file.header().data_origin();
+
+            // Create a `FrameBufferMut` that points at our pixel data and describes
+            // it as RGB data.
+            let mut fb = openexr::FrameBufferMut::new_with_origin(
+                origin_x,
+                origin_y,
+                width,
+                height,
+            );
+            fb.insert_channels(&[("R", 0.0), ("G", 0.0), ("B", 0.0)], &mut pixel_data);
+
+            // Read pixel data from the file.
+            input_file.read_pixels(&mut fb).unwrap();
+        }
+        TextureImage {
+            pixels: pixel_data,
+            width,
+            height,
+        }
+    }
+
+    fn add_portal(&mut self, quads: [Quad; 2]) {
+        self.materials.push(Material::Portal(PortalMaterial::new(quads[0], quads[1])));
+        self.materials.push(Material::Portal(PortalMaterial::new(quads[1], quads[0])));
+        self.objects.push((Shape::Quad(quads[0]), self.materials.len()-2));
+        self.objects.push((Shape::Quad(quads[1]), self.materials.len()-1));
+    }
+
+    fn load_textures(&self) -> Vec<TextureImage> {
+        let mut loaded = vec![];
+        for file in &self.texture_filenames {
+            let texture = Scene::load_exr(&file);
+            loaded.push(texture);
+        }
+        loaded
+    }
+
     fn compile(self) -> CompiledScene {
         let mut spheres = vec![];
         let mut quads   = vec![];
         let mut triangles = vec![];
         let mut bvh_shapes = vec![];
         let mut shape_indices = vec![];
+        let texture_images = self.load_textures();
 
         for (shape, material) in self.objects.iter() {
             match shape {
@@ -232,8 +355,10 @@ impl Scene {
         let bvh = flat;
 
         let mut diffuse    = vec![];
+        let mut textures = vec![];
         let mut dielectric = vec![];
         let mut emissive   = vec![];
+        let mut portals = vec![];
 
         let mut material_reprs : Vec<u32> = vec![];
         for mat in self.materials.into_iter() {
@@ -254,6 +379,14 @@ impl Scene {
                     emissive.push(x);
                     emissive.len()-1
                 }
+                Material::Texture(x) => {
+                    textures.push(x);
+                    textures.len()-1
+                }
+                Material::Portal(x) => {
+                    portals.push(x);
+                    portals.len()-1
+                }
             };
             material_reprs.push(((tag as u32) << MATERIAL_TAG_SHIFT) + ix as u32);
         }
@@ -270,10 +403,18 @@ impl Scene {
         }
 
         let mut emitters = vec![];
+        if self.has_envmap {
+            emitters.push(Emitter {
+                shape: -1, //unused
+                pdf: 0.,
+                cdf: 0.,
+                pad: 0.,
+            });
+        }
         for (ix, mat) in materials.iter().enumerate() {
             if mat >> MATERIAL_TAG_SHIFT == MaterialType::Emissive as u8 as u32 {
                 emitters.push(Emitter {
-                    shape: ix as u32,
+                    shape: ix as i32,
                     pdf: 0.,
                     cdf: 0.,
                     pad: 0.,
@@ -281,6 +422,7 @@ impl Scene {
             }
         };
         let num_emitters = emitters.len();
+
         let emitter_pdf = 1.0 / num_emitters as f32;
         let mut cdf = 0.;
         for emitter in &mut emitters {
@@ -306,6 +448,8 @@ impl Scene {
             ("diffuse", std::mem::size_of_val(&diffuse[..])),
             ("dielectric", std::mem::size_of_val(&dielectric[..])),
             ("emissive", std::mem::size_of_val(&emissive[..])),
+            ("textures", std::mem::size_of_val(&textures[..])),
+            ("portals", std::mem::size_of_val(&portals[..])),
         ].into_iter().scan((0u32,0u64), |&mut (ref mut index, ref mut offset), (name,size)| {
             let size = (size+BUFFER_ALIGNMENT-1)&!(BUFFER_ALIGNMENT-1);
             let size = size as wgpu::BufferAddress;
@@ -323,6 +467,7 @@ impl Scene {
 
         CompiledScene {
             camera: self.camera,
+            texturemap: texture_images,
             bindings,
             spheres,
             quads,
@@ -334,6 +479,9 @@ impl Scene {
             diffuse,
             dielectric,
             emissive,
+            textures,
+            portals,
+            has_envmap: self.has_envmap,
         }
     }
 }
@@ -348,7 +496,7 @@ struct BindingInfo {
 
 #[derive(Debug,Copy,Clone)]
 struct Emitter {
-    shape: u32,
+    shape: i32,
     pdf: f32,
     cdf: f32,
     pad: f32,
@@ -357,6 +505,8 @@ struct Emitter {
 #[derive(Debug)]
 struct CompiledScene {
     camera: Camera,
+
+    texturemap: Vec<TextureImage>,
 
     bindings: Vec<BindingInfo>,
 
@@ -374,6 +524,9 @@ struct CompiledScene {
     diffuse: Vec<DiffuseMaterial>,
     dielectric: Vec<DielectricMaterial>,
     emissive: Vec<EmitterMaterial>,
+    textures: Vec<TextureMaterial>,
+    portals: Vec<PortalMaterial>,
+    has_envmap: bool,
 }
 
 
@@ -403,6 +556,11 @@ impl Scene {
                 rotation,
                 fov: 27.7,
             },
+            texture_filenames: vec![
+                                //"textures/road_envmap.exr".to_owned(), 
+                                "textures/wood_thingy.exr".to_owned()
+                               ],
+            has_envmap: false,
             objects: vec![],
             materials: vec![],
             vertices: vec![],
@@ -566,7 +724,8 @@ impl CompiledScene {
             //put(&mut buffer, &self.mirrors[..]);
             put(&mut buffer, &self.dielectric[..]);
             put(&mut buffer, &self.emissive[..]);
-            //put(&mut buffer, &self.portals[..]);
+            put(&mut buffer, &self.textures[..]);
+            put(&mut buffer, &self.portals[..]);
         }
 
         assert!(buffer.is_empty()); // we filled the buffer
@@ -725,12 +884,17 @@ struct IntegratorPipeline {
     pipeline: wgpu::ComputePipeline,
 }
 
+const TEXTURE_BINDING: u32 = 2;
+const ENVMAP_BINDING: u32 = TEXTURE_BINDING + 1;
+const INTEGRATOR_BINDING_OFFSET: u32 = ENVMAP_BINDING + 4;
+
 impl IntegratorPipeline {
     fn new(
         gpu: &mut GPU,
         scene: &CompiledScene,
         scene_buffer: &wgpu::Buffer,
         current_block: &wgpu::Buffer,
+        image_textures: &Vec<wgpu::TextureView>,
         output: &wgpu::TextureView,
         use_bvh: bool,
     ) -> Self {
@@ -738,10 +902,16 @@ impl IntegratorPipeline {
         for binding in &scene.bindings {
             definitions.push((
                     format!("BINDING_{}", binding.name.to_uppercase()),
-                    format!("{}", binding.index+2)
+                    format!("{}", binding.index+INTEGRATOR_BINDING_OFFSET)
                     ));
         }
+        definitions.push(("BINDING_TEXTURE_IMAGES".to_owned(), TEXTURE_BINDING.to_string()));
+        definitions.push(("BINDING_ENVMAP".to_owned(), ENVMAP_BINDING.to_string()));
+        definitions.push(("BINDING_ENVMAP_BW".to_owned(), (ENVMAP_BINDING+1).to_string()));
+        definitions.push(("BINDING_ENVMAP_CDF".to_owned(), (ENVMAP_BINDING+2).to_string()));
+        definitions.push(("BINDING_ENVMAP_CDF2".to_owned(), (ENVMAP_BINDING+3).to_string()));
         definitions.push(("USE_BVH".to_owned(), if use_bvh {"1".to_owned()} else {"0".to_owned()}));
+        definitions.push(("HAS_ENVMAP".to_owned(), if scene.has_envmap {"1".to_owned()} else {"0".to_owned()}));
         definitions.push(("MATERIAL_TAG_SHIFT".to_owned(), format!("{}", MATERIAL_TAG_SHIFT)));
         for material_type in MaterialType::iter() {
             definitions.push((
@@ -753,7 +923,6 @@ impl IntegratorPipeline {
         let shader_module = gpu.load_shader_from_file("shader/render.glsl", &definitions.iter().map(|(a,b)| (a.as_ref(), b.as_ref())).collect::<Vec<(&str, &str)>>()[..]);
         let device = &mut gpu.device;
 
-        //let scene_subbuffer_sizes = scene.subbuffer_sizes();
         let mut bindings = vec![
             wgpu::BindGroupLayoutBinding {
                 binding: 0,
@@ -773,9 +942,21 @@ impl IntegratorPipeline {
                 },
             },
         ];
+        for i in 0..image_textures.len() {
+            bindings.push(
+                wgpu::BindGroupLayoutBinding {
+                    binding: TEXTURE_BINDING + i as u32,
+                    visibility: wgpu::ShaderStage::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        dimension: wgpu::TextureViewDimension::D2Array, // TODO
+                    },
+                }
+            );
+        }
+
         for binding in &scene.bindings {
             bindings.push(wgpu::BindGroupLayoutBinding {
-                binding: 2 + binding.index,
+                binding: INTEGRATOR_BINDING_OFFSET + binding.index,
                 visibility: wgpu::ShaderStage::COMPUTE,
                 ty: wgpu::BindingType::StorageBuffer {
                     dynamic: false,
@@ -812,9 +993,17 @@ impl IntegratorPipeline {
                 resource: wgpu::BindingResource::TextureView(output),
             },
         ];
+        for (i, texture) in image_textures.iter().enumerate() {
+            bindings.push(
+                wgpu::Binding {
+                    binding: TEXTURE_BINDING + i as u32,
+                    resource: wgpu::BindingResource::TextureView(texture),
+                }
+            );
+        }
         for binding in &scene.bindings {
             bindings.push(wgpu::Binding {
-                binding: 2 + binding.index,
+                binding: INTEGRATOR_BINDING_OFFSET + binding.index,
                 resource: wgpu::BindingResource::Buffer {
                     buffer: &scene_buffer,
                     range: binding.offset..binding.offset+binding.size,
@@ -1162,35 +1351,84 @@ impl Renderer {
             usage: wgpu::BufferUsage::STORAGE | wgpu::BufferUsage::COPY_DST,
         });
 
-        let intermediate_texture = device.create_texture(&wgpu::TextureDescriptor {
-            size: wgpu::Extent3d {
-                width: block_size,
-                height: block_size,
-                depth: 1,
-            },
-            array_layer_count: 3,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsage::STORAGE,
-        });
+        fn create_wgpu_texture(width: u32, height: u32, device: &wgpu::Device, usage: wgpu::TextureUsage, layer_count: u32) -> wgpu::Texture {
+            device.create_texture(&wgpu::TextureDescriptor {
+                size: wgpu::Extent3d {
+                    width: width,
+                    height: height,
+                    depth: 1,
+                },
+                array_layer_count: layer_count,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: usage,
+            })
+        }
 
-        let final_texture = device.create_texture(&wgpu::TextureDescriptor {
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth: 1,
-            },
-            array_layer_count: 1,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsage::STORAGE
-                | wgpu::TextureUsage::COPY_SRC
-                | wgpu::TextureUsage::COPY_DST,
-        });
+        fn write_textures_to_gpu(textures: &[TextureImage], device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) -> wgpu::Texture {
+            let mut max_width = 0;
+            let mut max_height = 0;
+            for texture in textures {
+                max_width = std::cmp::max(texture.width, max_width);
+                max_height = std::cmp::max(texture.height, max_height);
+            };
+            let wgpu_texture = device.create_texture(&wgpu::TextureDescriptor {
+                size: wgpu::Extent3d {
+                    width: max_width,
+                    height: max_height,
+                    depth: 1,
+                },
+                array_layer_count: textures.len() as u32,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsage::STORAGE | wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::COPY_DST,
+            });
+            assert_eq!(max_width, 512); // we only allow 512x512 textures
+            assert_eq!(max_height, 512);
+            let height = 512;
+            let width = 512;
+            for (i, texture) in textures.iter().enumerate() {
+                //let row_size = (max_width + 255) & !255; // pad
+                let texture_buffer = device
+                    .create_buffer_mapped(
+                        (width * height) as usize,
+                        wgpu::BufferUsage::COPY_SRC | wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::MAP_READ,
+                        ).fill_from_slice(&texture.pixels[..]);
+                encoder.copy_buffer_to_texture(
+                    wgpu::BufferCopyView {
+                        buffer: &texture_buffer,
+                        offset: 0,
+                        row_pitch: width * std::mem::size_of::<[f32; 4]>() as u32,
+                        image_height: height,
+                    },
+                    wgpu::TextureCopyView {
+                        texture: &wgpu_texture,
+                        mip_level: 0,
+                        array_layer: i as u32,
+                        origin: wgpu::Origin3d {
+                            x: 0.,
+                            y: 0.,
+                            z: 0.,
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                );
+            };
+            wgpu_texture
+        }
+
+        let intermediate_texture = create_wgpu_texture(block_size, block_size, &device, wgpu::TextureUsage::STORAGE, 1);
+
+        let final_texture = create_wgpu_texture(width, height, &device, wgpu::TextureUsage::STORAGE | wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::COPY_DST, 3);
+
         let row_size = (width + 255) & !255;
         let final_output_buffer = device
             .create_buffer_mapped(
@@ -1203,6 +1441,103 @@ impl Renderer {
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
+
+        fn create_and_write_texture(textureImage: &TextureImage, encoder: &mut wgpu::CommandEncoder, device: &wgpu::Device) -> wgpu::Texture {
+                let texture = create_wgpu_texture(textureImage.width, textureImage.height, &device, wgpu::TextureUsage::STORAGE | wgpu::TextureUsage::COPY_SRC | wgpu::TextureUsage::COPY_DST, 1);
+                let env_row_size = (textureImage.width + 255) & (!255);
+                let texture_buffer = device
+                    .create_buffer_mapped(
+                        (env_row_size * textureImage.height) as usize,
+                        wgpu::BufferUsage::COPY_SRC | wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::MAP_READ,
+                        ).fill_from_slice(&textureImage.pixels[..]);
+
+                encoder.copy_buffer_to_texture(
+                    wgpu::BufferCopyView {
+                        buffer: &texture_buffer,
+                        offset: 0,
+                        row_pitch: env_row_size * std::mem::size_of::<[f32; 4]>() as u32,
+                        image_height: textureImage.height,
+                    },
+                    wgpu::TextureCopyView {
+                        texture: &texture,
+                        mip_level: 0,
+                        array_layer: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0.,
+                            y: 0.,
+                            z: 0.,
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: textureImage.width,
+                        height: textureImage.height,
+                        depth: 1,
+                    },
+                );
+                texture
+        }
+
+        fn preprocess_envmap(envmap: &TextureImage) -> Vec<TextureImage> {
+            let mut processed = vec![];
+            let bw: Vec<f32> = envmap.pixels.iter().map(|v| v.iter().cloned().fold(0./0., f32::max)).collect();
+            let mut sum_of_rows: Vec<f32> = vec![];
+            let mut total_of_envmap_values: f32 = 0.;
+            let mut normalized_bw: Vec<[f32; 4]> = vec![];
+            let mut cdfed_bw: Vec<[f32; 4]> = vec![];
+            for (y, row) in bw.windows(envmap.width as usize).enumerate() {
+                let theta = y as f32 / envmap.height as f32 * std::f32::consts::PI;
+                let sinTheta = f32::sin(theta);
+                let sinedRow: Vec<f32> = row.iter().map(|el| el * sinTheta).collect();
+                let sum: f32 = sinedRow.iter().sum();
+                total_of_envmap_values += sum;
+                sum_of_rows.push(sum);
+                let normalized_row: Vec<f32> = sinedRow.iter().map(|el| el / sum).collect();
+                let cdfed_row = normalized_row.iter().scan(0., |s, el| Some(*s+el));
+                let normalized_row: Vec<[f32; 4]> = normalized_row.iter().map(|e| [*e, 0., 0., 0.]).collect();
+                let cdfed_row: Vec<[f32; 4]> = cdfed_row.map(|e| [e, 0., 0., 0.]).collect();
+                normalized_bw.extend(normalized_row);
+                cdfed_bw.extend(cdfed_row);
+                //println!(format!("row {} done", i.to_str()));
+            }
+            let normalized_sum_of_rows = sum_of_rows.iter().map(|e| e / total_of_envmap_values);
+            let marginal_cdf = normalized_sum_of_rows.scan(0., |s, el| Some(*s+el));
+            let marginal_cdf: Vec<[f32; 4]> = marginal_cdf.map(|e| [e, 0., 0., 0.]).collect();
+            processed.push(TextureImage {
+                width: envmap.width,
+                height: envmap.height,
+                pixels: normalized_bw,
+            });
+            processed.push(TextureImage {
+                width: envmap.width,
+                height: envmap.height,
+                pixels: cdfed_bw,
+            });
+            processed.push(TextureImage {
+                width: envmap.height,
+                height: 1,
+                pixels: marginal_cdf,
+            });
+
+            unreachable!()
+        }
+
+        let wgpu_textures =
+            if scene.has_envmap {
+                let envmap = &scene.texturemap[0];
+                let envmap_texture = create_and_write_texture(envmap, &mut encoder, device);
+                //let preprocessed_envmaps: Vec<wgpu::Texture> = preprocess_envmap(envmap).iter().map(|e| create_and_write_texture(e, &mut encoder, device)).collect();
+
+                let texturemap = write_textures_to_gpu(&scene.texturemap[1..], &device, &mut encoder);
+                vec![texturemap.create_default_view(),
+                    envmap_texture.create_default_view(),]
+                    //preprocessed_envmaps[0].create_default_view(),
+                    //preprocessed_envmaps[1].create_default_view(),
+                    //preprocessed_envmaps[2].create_default_view()]
+            } else {
+                vec![write_textures_to_gpu(&scene.texturemap[..], &device, &mut encoder).create_default_view()]
+            };
+        //let textures = wgpu_textures.iter().map(|s| &s.create_default_view()).collect();
+
         encoder.copy_buffer_to_buffer(
             &scene_staging_buffer,
             0,
@@ -1210,6 +1545,7 @@ impl Renderer {
             0,
             scene_buffer_size as wgpu::BufferAddress,
         );
+
         encoder.copy_buffer_to_texture(
             wgpu::BufferCopyView {
                 buffer: &final_output_buffer,
@@ -1233,6 +1569,7 @@ impl Renderer {
                 depth: 1,
             },
         );
+
         // TODO: copy other data to gpu?
         gpu.queue.submit(&[encoder.finish()]);
 
@@ -1241,6 +1578,7 @@ impl Renderer {
             &scene,
             &scene_buffer,
             &current_block,
+            &wgpu_textures,
             &intermediate_texture.create_default_view(),
             use_bvh,
         );
@@ -1429,9 +1767,11 @@ fn main() {
 
     let mut scene = Scene::from_obj(opt.scene);
     if opt.put_cbox_spheres {
-        scene.materials.push(Material::Mirror(MirrorMaterial{}));
-        scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
-        //scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(1., 0., 1.), 1.5)));
+        //scene.materials.push(Material::Mirror(MirrorMaterial{}));
+        //scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
+        scene.materials.push(Material::Texture(TextureMaterial::new(0)));
+        //scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
+        scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(0., 0., 0.), 1.5)));
         scene.objects.push((Shape::Sphere(Sphere {
                     // mirror sphere
                     position: Point3::new(-0.421400, 0.332100, -0.280000),
@@ -1442,6 +1782,9 @@ fn main() {
                     position: Point3::new(0.445800, 0.332100, 0.376700),
                     radius: 0.3263,
                 }), scene.materials.len()-1));
+        //scene.add_portal(
+        //    [Quad::new(Point3::new(0.445800, 0.832100, 0.876700), Vector3::new(0., -0.5, 0.), Vector3::new(0.5, 0., 0.)),
+        //     Quad::new(Point3::new(-0.421400, 1.332100, -0.280000), Vector3::new(0., -0.5, 0.), Vector3::new(-0.5, 0., 0.))]);
     }
 
     let block_generator = ImageBlockGenerator::new(opt.width, opt.height, 128, opt.sample_count);
