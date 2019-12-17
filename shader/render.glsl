@@ -53,6 +53,7 @@ struct ShapeQueryRecord {
 
 
 #include "materials/diffuse.glsl"
+#include "materials/diffusecb.glsl"
 #include "materials/mirror.glsl"
 #include "materials/dielectric.glsl"
 #include "materials/emissive.glsl"
@@ -111,7 +112,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		if (material_tag == MATERIAL_TAG_EMISSIVE && wasDiscrete) {
 			total += throughput * emissiveMaterials[material_idx].power;
 		}
-		if (material_tag == MATERIAL_TAG_DIFFUSE) {
+		if (material_tag == MATERIAL_TAG_DIFFUSE || material_tag == MATERIAL_TAG_DIFFUSECBOARD) {
 			ShapeQueryRecord sRec;
 			Ray shadowRay;
 			vec3 importance = sampleEmitter(its.p, shadowRay);
@@ -154,7 +155,7 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		ray.tMin = 2.*M_EPS;
 		ray.tMax = 1e100;
 
-		wasDiscrete = material_tag != MATERIAL_TAG_DIFFUSE;
+		wasDiscrete = material_tag != MATERIAL_TAG_DIFFUSE && material_tag != MATERIAL_TAG_DIFFUSECBOARD;
 
 		if (bounce > 3) {
 			float q = min(0.99, max(throughput.r, max(throughput.g, throughput.b)));

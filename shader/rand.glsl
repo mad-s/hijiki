@@ -6,7 +6,7 @@ uint randUint() {
 	return rngState;
 }
 
-void seedRng(uint seed) {
+void seedRng(uint seed) { // Thomas wang's hash function
 	seed = (seed ^ 61) ^ (seed >> 16);
 	seed *= 9;
 	seed = seed ^ (seed >> 4);

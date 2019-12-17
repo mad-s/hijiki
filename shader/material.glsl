@@ -2,6 +2,10 @@ layout(set = 0, binding = BINDING_DIFFUSE) buffer DiffuseMaterials {
 	 DiffuseMaterial diffuseMaterials[];
 };
 
+layout(set = 0, binding = BINDING_DIFFUSECB) buffer DiffuseCBMaterials {
+	 DiffuseCheckerboardMaterial diffuseCBMaterials[];
+};
+
 layout(set = 0, binding = BINDING_DIELECTRIC) buffer DielectricMaterials {
 	 DielectricMaterial dielectricMaterials[];
 };
@@ -16,6 +20,9 @@ vec3 evalBSDF(uint material, vec3 wi, Intersection its, vec3 wo) {
 	uint idx = material & ((1 << MATERIAL_TAG_SHIFT)-1);
 	if (tag == MATERIAL_TAG_DIFFUSE) {
 		vec3 color = diffuseMaterials[idx].color;
+		return dot(its.n,wi) * color / M_PI;
+	} else if (tag == MATERIAL_TAG_DIFFUSECBOARD) {
+		vec3 color = getCheckerboardTexture(diffuseCBMaterials[idx], its.uv);
 		return dot(its.n,wi) * color / M_PI;
 	} else {
 		return vec3(0.);
@@ -33,6 +40,10 @@ vec3 sampleBSDF(uint material, vec3 wi, Intersection its, out vec3 wo, inout vec
 			//wo = quaternionRotate(wo_local, localToWorld);
 			wo = its.frame * wo_local;
 			return diffuseMaterials[idx].color;
+		case MATERIAL_TAG_DIFFUSECBOARD:
+			vec3 wo2_local = randCosHemisphere();
+			wo = its.frame * wo2_local;
+			return getCheckerboardTexture(diffuseCBMaterials[idx], its.uv);
 		case MATERIAL_TAG_MIRROR:
 			wo = reflect(wi, its.n);
 			return vec3(1.);

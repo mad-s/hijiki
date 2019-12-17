@@ -21,7 +21,12 @@ bool intersectTriangle(Ray ray, Vertex a, Vertex b, Vertex c, inout Intersection
 	float t = d*dot(-n, ro);
 	if (ray.tMin <= t && t <= ray.tMax) {
 		its.t = t;
-		its.n = normalize(n);
+		vec3 lambda = vec3(1.-u-v,u,v);
+		its.n = normalize(
+			a.norm_v.xyz * lambda[0] +
+			b.norm_v.xyz * lambda[1] +
+			c.norm_v.xyz * lambda[2]);
+		//its.n = normalize(n);
 		return true;
 	}
 	return false;
@@ -37,10 +42,13 @@ void sampleTriangle(Vertex a, Vertex b, Vertex c, out ShapeQueryRecord sRec) {
 	n /= 2.*area;
 
 	vec3 lambda = randBarycentric();
-	sRec.n = n;
+	sRec.n = normalize(
+		a.norm_v.xyz * lambda[0] +
+		b.norm_v.xyz * lambda[1] +
+		c.norm_v.xyz * lambda[2]);
 	sRec.p =
-		a.pos_u.xyz * lambda[0] + 
-		b.pos_u.xyz * lambda[1] + 
+		a.pos_u.xyz * lambda[0] +
+		b.pos_u.xyz * lambda[1] +
 		c.pos_u.xyz * lambda[2];
 	sRec.pdf = 1.0 / area;
 }

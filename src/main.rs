@@ -37,6 +37,7 @@ use shape::*;
 #[strum_discriminants(derive(EnumIter,AsRefStr))]
 enum Material {
     Diffuse(DiffuseMaterial),
+    DiffuseCBoard(DiffuseCheckerboardMaterial),
     Mirror(MirrorMaterial),
     Dielectric(DielectricMaterial),
     Emissive(EmitterMaterial),
@@ -102,6 +103,15 @@ struct CompiledBVHNode {
 #[derive(Debug, Clone, Copy)]
 struct DiffuseMaterial {
     color: Vec3,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+struct DiffuseCheckerboardMaterial {
+    color1: Vector3<f32>,
+    scale_u: f32,
+    color2: Vector3<f32>,
+    scale_v: f32
 }
 
 #[repr(C, align(16))]
@@ -185,7 +195,9 @@ impl Scene {
             bvh_shapes.push(BVHShape{shape: *shape, node_index: 0, scene: &self});
         }
 
+        println!("Building BVH");
         let bvh = bvh::bvh::BVH::build(&mut bvh_shapes[..]);
+        println!("Built BVH with {} nodes", bvh.nodes.len());
         //bvh.pretty_print();
 
         let mut indices = vec![usize::max_value(); bvh.nodes.len()];
@@ -232,6 +244,7 @@ impl Scene {
         let bvh = flat;
 
         let mut diffuse    = vec![];
+        let mut diffusecb  = vec![];
         let mut dielectric = vec![];
         let mut emissive   = vec![];
 
@@ -243,6 +256,10 @@ impl Scene {
                     diffuse.push(x);
                     diffuse.len()-1
                 },
+                Material::DiffuseCBoard(x) => {
+                    diffusecb.push(x);
+                    diffusecb.len()-1
+                }
                 Material::Mirror(MirrorMaterial{}) => {
                     0
                 }, // no data needed
@@ -304,6 +321,7 @@ impl Scene {
             ("materials", std::mem::size_of_val(&materials[..])),
             ("emitters", std::mem::size_of_val(&emitters[..])),
             ("diffuse", std::mem::size_of_val(&diffuse[..])),
+            ("diffusecb", std::mem::size_of_val(&diffusecb[..])),
             ("dielectric", std::mem::size_of_val(&dielectric[..])),
             ("emissive", std::mem::size_of_val(&emissive[..])),
         ].into_iter().scan((0u32,0u64), |&mut (ref mut index, ref mut offset), (name,size)| {
@@ -332,6 +350,7 @@ impl Scene {
             materials,
             emitters,
             diffuse,
+            diffusecb,
             dielectric,
             emissive,
         }
@@ -372,6 +391,7 @@ struct CompiledScene {
     emitters: Vec<Emitter>,
 
     diffuse: Vec<DiffuseMaterial>,
+    diffusecb: Vec<DiffuseCheckerboardMaterial>,
     dielectric: Vec<DielectricMaterial>,
     emissive: Vec<EmitterMaterial>,
 }
@@ -419,7 +439,18 @@ impl Scene {
                 scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
             } else if material.name.starts_with("mirror") {
                 scene.materials.push(Material::Mirror(MirrorMaterial{}));
-            } else {
+            }
+            /*
+            else if material.name.starts_with("floor") {
+                scene.materials.push(Material::DiffuseCBoard(DiffuseCheckerboardMaterial {
+                    color1: Vector3::from_element(0.8),
+                    scale_u: 0.125,
+                    color2: Vector3::from_element(0.2),
+                    scale_v: 0.125,
+                }));
+            } 
+             */
+            else {
                 scene.materials.push(Material::Diffuse(DiffuseMaterial {
                     color: Vec3::from_array(material.diffuse),
                 }))
@@ -450,12 +481,12 @@ impl Scene {
             let mut last = [0,0,0];
             for tri in mesh.indices.chunks(3) {
                 let tri = [tri[0], tri[1], tri[2]];
-                //scene.objects.push((Shape::Triangle([
-                //    tri[0] + vertex_offset,
-                //    tri[1] + vertex_offset,
-                //    tri[2] + vertex_offset,
-                //]), material));
-                //continue;
+                scene.objects.push((Shape::Triangle([
+                    tri[0] + vertex_offset,
+                    tri[1] + vertex_offset,
+                    tri[2] + vertex_offset,
+                ]), material));
+                continue;
 
                 if tri[0] == last[0] && tri[1] == last[2] { // recover triangulated quads
                     let a = last[0] as usize;
@@ -563,6 +594,7 @@ impl CompiledScene {
             put(&mut buffer, &self.emitters[..]);
 
             put(&mut buffer, &self.diffuse[..]);
+            put(&mut buffer, &self.diffusecb[..]);
             //put(&mut buffer, &self.mirrors[..]);
             put(&mut buffer, &self.dielectric[..]);
             put(&mut buffer, &self.emissive[..]);
@@ -1430,7 +1462,13 @@ fn main() {
     let mut scene = Scene::from_obj(opt.scene);
     if opt.put_cbox_spheres {
         scene.materials.push(Material::Mirror(MirrorMaterial{}));
-        scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
+        //scene.materials.push(Material::Dielectric(DielectricMaterial::clear(1.5)));
+        scene.materials.push(Material::DiffuseCBoard(DiffuseCheckerboardMaterial {
+            color1: Vector3::new(1.0,0.4,0.7),
+            scale_u: 0.1,
+            color2: Vector3::new(0.4,0.7,1.0),
+            scale_v: 0.2,
+        }));
         //scene.materials.push(Material::Dielectric(DielectricMaterial::tinted(vec3(1., 0., 1.), 1.5)));
         scene.objects.push((Shape::Sphere(Sphere {
                     // mirror sphere
