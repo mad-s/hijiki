@@ -94,8 +94,10 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 		if (!intersectScene(ray, its)) {
 			return;
 		}
-		//total = vec3(its.objectID);
-		//return;
+		/*
+		total = vec3(its.uv, 0);
+		return;
+		*/
 
 		if (bounce == 0) {
 			depth  = its.t;
@@ -121,33 +123,8 @@ void integrateRay(Ray ray, out vec3 total, out vec3 albedo, out float depth, out
 					total += throughput * evalBSDF(mat, shadowRay.direction, its, -ray.direction) * importance;
 				}
 			}
-			/*
-			sampleQuad(quads[2], sRec);
-
-			vec3 toLight = sRec.p - its.p;
-			float r = length(toLight);
-			toLight /= r;
-			float cosTheta = dot(toLight, its.n);
-			if (cosTheta > 0) {
-				float cosThetaL = -dot(toLight, sRec.n);
-				if (cosThetaL > 0) {
-					float pdf = sRec.pdf * r*r / cosThetaL;
-
-					Ray shadowRay;
-					shadowRay.origin = its.p;
-					shadowRay.direction = toLight;
-					shadowRay.tMin = 2.*M_EPS;
-					shadowRay.tMax = r-M_EPS;
-					
-					if (!intersectScene(shadowRay)) {
-						total += throughput * evalBSDF(mat, toLight, its, -ray.direction) * emissiveMaterials[0].power / pdf;
-					}
-				}
-			}
-			*/
 		}
 
-		
 		vec3 wo;
 		throughput *= sampleBSDF(mat, ray.direction, its, wo, currentExtinction);
 		ray.direction = wo;

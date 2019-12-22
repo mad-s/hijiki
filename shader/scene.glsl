@@ -24,14 +24,7 @@ layout(set = 0, binding = BINDING_QUADS) buffer Quads {
 	Quad quads[];
 };
 
-layout(set = 0, binding = BINDING_TRIANGLES) buffer Triangles {
-	uint triangles[];
-};
 
-
-layout(set = 0, binding = BINDING_VERTICES) buffer Vertices {
-	Vertex vertices[];
-};
 
 layout(set = 0, binding = BINDING_MATERIALS) buffer Materials {
 	uint materials[];
@@ -54,13 +47,7 @@ void sampleShape(uint shape, out ShapeQueryRecord sRec) {
 	} else if (shape < numSpheres+numQuads) {
 		sampleQuad(quads[shape-numSpheres], sRec);
 	} else {
-		uint ix = shape - numSpheres - numQuads;
-		sampleTriangle(
-			vertices[triangles[3*ix+0]],
-			vertices[triangles[3*ix+1]],
-			vertices[triangles[3*ix+2]],
-			sRec
-		);
+		sampleTriangle(shape - numSpheres - numQuads, sRec);
 	}
 }
 
@@ -123,11 +110,7 @@ bool intersectScene(Ray ray, out Intersection its) {
 				hasIntersection = intersectQuad(ray, quads[shapeIndex-numSpheres], its);
 			} else {
 				uint ix = shapeIndex - numSpheres - numQuads;
-				hasIntersection = intersectTriangle(ray,
-						vertices[triangles[3*ix+0]],
-						vertices[triangles[3*ix+1]],
-						vertices[triangles[3*ix+2]],
-						its);
+				hasIntersection = intersectTriangle(ray, ix, its);
 			}
 			if (hasIntersection) {
 				ray.tMax = its.t - M_EPS;
@@ -167,11 +150,7 @@ bool intersectScene(Ray ray, out Intersection its) {
 		}
 	}
 	for (int i = 0; i < numTriangles; i++) {
-		if (intersectTriangle(ray, 
-				vertices[triangles[3*i+0]],
-				vertices[triangles[3*i+1]],
-				vertices[triangles[3*i+2]],
-			its)) {
+		if (intersectTriangle(ray, i, its)) {
 			ray.tMax = its.t - M_EPS;
 			its.objectID = numSpheres + numQuads + i;
 		}
@@ -189,15 +168,7 @@ bool intersectScene(Ray ray, out Intersection its) {
 	} else if (its.objectID < numSpheres + numQuads) {
 		populateQuadIntersection(quads[its.objectID-numSpheres], its);
 	} else {
-		vec3 t,b;
-		if (abs(its.n.x) > abs(its.n.y)) {
-			b = vec3(0.,1.,0.);
-		} else {
-			b = vec3(1.,0.,0.);
-		}
-		t = normalize(cross(its.n, b));
-		b = cross(its.n, t);
-		its.frame = mat3(t, b, its.n);
+		populateTriangleIntersection(its.objectID-numSpheres-numQuads, its);
 	}
 
 	return true;
