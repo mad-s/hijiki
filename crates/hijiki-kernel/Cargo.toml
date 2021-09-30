@@ -1,0 +1,11 @@
+[package]
+name = "hijiki-kernel"
+version = "0.1.0"
+edition = "2018"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+hijiki-render = { path = "../hijiki-render" }
+spirv-std = { git = "https://github.com/EmbarkStudios/rust-gpu", features = ["glam"] }

@@ -1,0 +1,10 @@
+[package]
+name = "hijiki"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+hijiki-render = { path = "crates/hijiki-render" }
+
+[build-dependencies]
+spirv-builder = { git = "https://github.com/EmbarkStudios/rust-gpu" }
